@@ -484,6 +484,16 @@
       return !state.blue.has(key) && !state.red.has(key);
     }
 
+    function pickAnyLegalEdge(state) {
+      const k = state.k;
+      for (let u = 0; u < k; u++) {
+        for (let v = u + 1; v < k; v++) {
+          if (isLegal(state, u, v)) return { u, v };
+        }
+      }
+      return null;
+    }
+
     function availableAdjMask(state) {
       // adjacency for "not blue" (neutral + red). Returns array of bitmasks.
       const k = state.k;
@@ -2758,7 +2768,19 @@
             }
           }
           if (must.length > 0 && must.length <= size) {
-            sets.push({ edges: must, score: 1e9 });
+            // Pad to full turn size so the AI doesn't waste remaining deletions.
+            const mustKeys = new Set(must.map(e => edgeKey(e.u, e.v)));
+            const padded = must.slice();
+            let padScore = 0;
+            for (const e of pool) {
+              if (padded.length >= size) break;
+              const key = edgeKey(e.u, e.v);
+              if (mustKeys.has(key)) continue;
+              padded.push({ u: e.u, v: e.v });
+              mustKeys.add(key);
+              padScore += e.score;
+            }
+            sets.push({ edges: padded, score: 1e9 + padScore });
           }
         }
       }
@@ -3101,7 +3123,14 @@
               }
             }
 
-            // If we didn't spend all moves, end the turn.
+            // Auto-cop should never waste deletions: blocking more edges cannot help the robber.
+            while (!state.gameOver && state.turn === COP && state.copMovesLeft > 0) {
+              const mv = copPickEdge(state) || pickAnyLegalEdge(state);
+              if (!mv) break; // no legal edges left
+              applyMove(state, mv.u, mv.v);
+            }
+
+            // If we still have moves left, there are no legal edges; end the turn.
             if (!state.gameOver && state.turn === COP && state.copMovesLeft > 0) {
               state.undoStack.push(snapshotForUndo(state));
               endTurn(state);
