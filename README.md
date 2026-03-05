@@ -8,8 +8,10 @@ clear && rm a.out; g++ ncop.cpp && ./a.out
 
 ## Web UI (2-player)
 
-Open:
+Run locally:
 
-- `webui/index.html`
+- open `webui/index.html` in your browser.
 
-in your browser.
+Hosted (GitHub Pages):
+
+- https://meghanto.github.io/n-cop/
