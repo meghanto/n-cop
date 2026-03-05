@@ -352,6 +352,14 @@
 
       <div>
         <h2 style="margin-top:14px">Moves</h2>
+        <div class="posBtnRow" style="margin-top:8px">
+          <button id="histStart" type="button" title="Go to start">⏮</button>
+          <button id="histPrev" type="button" title="Previous">◀</button>
+          <input id="histSlider" type="range" min="0" max="0" value="0" style="flex:1" />
+          <button id="histNext" type="button" title="Next">▶</button>
+          <button id="histEnd" type="button" title="Go to end">⏭</button>
+        </div>
+        <div class="posHelp" id="histLabel">Step 0/0</div>
         <div class="movesBox" id="moves"></div>
       </div>
 
@@ -432,7 +440,7 @@
     }
 
     function makeState(k, n) {
-      return {
+      const st = {
         k,
         n,
         turn: COP,
@@ -442,10 +450,15 @@
         red: new Set(),
         // move list, grouped like chess: rounds[i] has cop edges (0..n) and robber edge (0/1)
         moveRounds: [{ cop: [], robber: null }],
-        undoStack: [], // stack of snapshots for Undo
+        // Move browser: history of snapshots (step 0 = initial)
+        history: [],
+        historyIndex: 0,
         gameOver: false,
         winner: null,
       };
+      st.history = [snapshotForUndo(st)];
+      st.historyIndex = 0;
+      return st;
     }
 
     function cloneMoveRounds(rounds) {
@@ -608,6 +621,20 @@
       }
     }
 
+    function pushHistory(state) {
+      if (!state.history) {
+        state.history = [snapshotForUndo(state)];
+        state.historyIndex = 0;
+        return;
+      }
+      const idx = state.historyIndex | 0;
+      if (idx < state.history.length - 1) {
+        state.history = state.history.slice(0, idx + 1);
+      }
+      state.history.push(snapshotForUndo(state));
+      state.historyIndex = state.history.length - 1;
+    }
+
     function applyMove(state, u, v) {
       if (state.gameOver) return { ok: false, reason: 'game over' };
       if (!isLegal(state, u, v)) return { ok: false, reason: 'illegal edge' };
@@ -615,18 +642,15 @@
 
       if (state.turn === COP) {
         if (state.copMovesLeft <= 0) return { ok: false, reason: 'no cop moves left' };
-        // record snapshot for undo
-        state.undoStack.push(snapshotForUndo(state));
         state.blue.add(key);
         recordMove(state, COP, u, v);
         state.copMovesLeft--;
         recomputeGameOver(state);
         if (!state.gameOver && state.copMovesLeft === 0) endTurn(state);
         if (els.copView && els.copView.value !== 'blue') forceNeedsRelax = true;
+        pushHistory(state);
         return { ok: true };
       } else {
-        // record snapshot for undo
-        state.undoStack.push(snapshotForUndo(state));
         state.red.add(key);
         recordMove(state, ROBBER, u, v);
         recomputeGameOver(state);
@@ -638,22 +662,35 @@
         }
         // In robber-attraction layout, robber edges affect the layout.
         if (els.copView && els.copView.value === 'robber') forceNeedsRelax = true;
+        pushHistory(state);
         return { ok: true };
       }
     }
 
-    function undo(state) {
-      if (!state.undoStack.length) return;
+    function gotoHistory(state, idx) {
+      if (!state.history || !state.history.length) return;
+      const i = Math.max(0, Math.min(state.history.length - 1, idx | 0));
+      state.historyIndex = i;
       const blueBefore = state.blue.size;
       const redBefore = state.red.size;
-      const snap = state.undoStack.pop();
-      restoreFromUndoSnapshot(state, snap);
+      restoreFromUndoSnapshot(state, state.history[i]);
 
       if (els.copView) {
         const v = els.copView.value;
         if (v === 'delete' && state.blue.size !== blueBefore) forceNeedsRelax = true;
         if (v === 'robber' && (state.blue.size !== blueBefore || state.red.size !== redBefore)) forceNeedsRelax = true;
       }
+    }
+
+    function undo(state) {
+      if (!state.history || (state.historyIndex | 0) <= 0) return;
+      gotoHistory(state, (state.historyIndex | 0) - 1);
+    }
+
+    function redo(state) {
+      if (!state.history) return;
+      if ((state.historyIndex | 0) >= state.history.length - 1) return;
+      gotoHistory(state, (state.historyIndex | 0) + 1);
     }
 
     // --- Robber AI ------------------------------------------------------------
@@ -963,6 +1000,12 @@
       posImport: document.getElementById('posImport'),
       posCopy: document.getElementById('posCopy'),
       posCopyLink: document.getElementById('posCopyLink'),
+      histStart: document.getElementById('histStart'),
+      histPrev: document.getElementById('histPrev'),
+      histNext: document.getElementById('histNext'),
+      histEnd: document.getElementById('histEnd'),
+      histSlider: document.getElementById('histSlider'),
+      histLabel: document.getElementById('histLabel'),
       copLegend: document.getElementById('copLegend'),
       smallInfo: document.getElementById('smallInfo'),
       canvas: document.getElementById('board'),
@@ -1516,9 +1559,12 @@
       // Status
       updateStatus();
 
-      // Auto-play
-      maybeAutoCop();
-      maybeAutoRobber();
+      // Auto-play only when viewing the latest position.
+      const atEnd = !state.history || (state.historyIndex === state.history.length - 1);
+      if (atEnd) {
+        maybeAutoCop();
+        maybeAutoRobber();
+      }
     }
 
     function trimmedMoveRoundsForDisplay(rounds) {
@@ -1738,6 +1784,14 @@
       const n = Math.max(1, Math.min(8, parsed.n | 0));
       let st = makeState(k, n);
 
+      // Rebuild history as we replay so the move browser works after import.
+      st.history = [snapshotForUndo(st)];
+      st.historyIndex = 0;
+      function snap() {
+        st.history.push(snapshotForUndo(st));
+        st.historyIndex = st.history.length - 1;
+      }
+
       // Replay rounds
       for (const r of (parsed.rounds || [])) {
         if (st.gameOver) break;
@@ -1747,25 +1801,31 @@
           if (st.turn !== COP) throw new Error('Expected COP turn while replaying cop edges');
           const ok = applyMoveNoUndo(st, e.u, e.v);
           if (!ok.ok) throw new Error(`Illegal cop move (${e.u},${e.v}): ${ok.reason}`);
+          snap();
         }
 
         if (r && r.robber) {
           if (st.gameOver) break;
-          if (st.turn === COP) endTurn(st); // cop may have ended early
+          if (st.turn === COP) { endTurn(st); snap(); } // cop may have ended early
           if (st.turn !== ROBBER) throw new Error('Expected ROBBER turn while replaying robber edge');
           const ok = applyMoveNoUndo(st, r.robber.u, r.robber.v);
           if (!ok.ok) throw new Error(`Illegal robber move (${r.robber.u},${r.robber.v}): ${ok.reason}`);
+          snap();
         }
       }
 
       // Restore current turn/movesLeft if specified.
+      let adjusted = false;
       if (parsed && (parsed.turn === COP || parsed.turn === ROBBER)) {
         st.turn = parsed.turn;
+        adjusted = true;
       }
       if (parsed && Number.isFinite(parsed.copMovesLeft) && parsed.copMovesLeft !== null) {
         st.copMovesLeft = Math.max(0, Math.min(st.n, parsed.copMovesLeft | 0));
+        adjusted = true;
       }
       recomputeGameOver(st);
+      if (adjusted) snap();
 
       // Swap into UI
       state = st;
@@ -1870,9 +1930,30 @@
       }
 
       els.endTurn.disabled = (state.turn !== COP) || state.gameOver;
-      els.undo.disabled = (state.undoStack.length === 0);
+
+      const hlen = (state.history && state.history.length) ? state.history.length : 1;
+      const hidx = (state.historyIndex | 0);
+      els.undo.disabled = (hlen <= 1) || (hidx <= 0);
 
       updateMoveList();
+      updateHistoryUI();
+    }
+
+    function updateHistoryUI() {
+      if (!els.histSlider || !els.histLabel) return;
+      const hlen = (state.history && state.history.length) ? state.history.length : 1;
+      const hidx = Math.max(0, Math.min(hlen - 1, state.historyIndex | 0));
+      state.historyIndex = hidx;
+
+      els.histSlider.min = '0';
+      els.histSlider.max = String(Math.max(0, hlen - 1));
+      els.histSlider.value = String(hidx);
+      els.histLabel.textContent = `Step ${hidx}/${Math.max(0, hlen - 1)}`;
+
+      if (els.histStart) els.histStart.disabled = (hidx <= 0);
+      if (els.histPrev) els.histPrev.disabled = (hidx <= 0);
+      if (els.histNext) els.histNext.disabled = (hidx >= hlen - 1);
+      if (els.histEnd) els.histEnd.disabled = (hidx >= hlen - 1);
     }
 
     function computeRedComponents(state) {
@@ -2016,7 +2097,6 @@
         copMovesLeft: state.copMovesLeft,
         blue: new Set(state.blue),
         red: new Set(state.red),
-        undoStack: [],
         gameOver: state.gameOver,
         winner: state.winner,
       };
@@ -3132,8 +3212,8 @@
 
             // If we still have moves left, there are no legal edges; end the turn.
             if (!state.gameOver && state.turn === COP && state.copMovesLeft > 0) {
-              state.undoStack.push(snapshotForUndo(state));
               endTurn(state);
+              pushHistory(state);
             }
 
             draw();
@@ -3340,8 +3420,8 @@
 
     els.endTurn.addEventListener('click', () => {
       if (state.turn === COP && !state.gameOver) {
-        state.undoStack.push(snapshotForUndo(state));
         endTurn(state);
+        pushHistory(state);
         // Ending turn doesn't change deletions.
         draw();
       }
@@ -3349,6 +3429,10 @@
 
     els.undo.addEventListener('click', () => {
       undo(state);
+      hoverEdge = null;
+      hoverNode = null;
+      layout = null;
+      forceNeedsRelax = true;
       draw();
     });
 
@@ -3360,6 +3444,7 @@
       state = makeState(k, n);
       resetView();
       hoverEdge = null;
+      hoverNode = null;
       layout = null;
       forceNeedsRelax = true;
       draw();
@@ -3370,6 +3455,7 @@
       state = makeState(state.k, state.n);
       resetView();
       hoverEdge = null;
+      hoverNode = null;
       layout = null;
       forceNeedsRelax = true;
       draw();
@@ -3457,6 +3543,34 @@
         const ok = await copyTextToClipboard(url);
         if (!ok) alert('Copy failed.');
         if (els.posText) els.posText.value = exportPositionText(state);
+      });
+    }
+
+    function historyAtEnd() {
+      return !state.history || (state.historyIndex === state.history.length - 1);
+    }
+
+    function hardRefreshAfterHistoryJump() {
+      hoverEdge = null;
+      hoverNode = null;
+      layout = null;
+      forceNeedsRelax = true;
+      draw();
+    }
+
+    if (els.histStart) els.histStart.addEventListener('click', () => { gotoHistory(state, 0); hardRefreshAfterHistoryJump(); });
+    if (els.histPrev) els.histPrev.addEventListener('click', () => { undo(state); hardRefreshAfterHistoryJump(); });
+    if (els.histNext) els.histNext.addEventListener('click', () => { redo(state); hardRefreshAfterHistoryJump(); });
+    if (els.histEnd) els.histEnd.addEventListener('click', () => {
+      if (!state.history) return;
+      gotoHistory(state, state.history.length - 1);
+      hardRefreshAfterHistoryJump();
+    });
+    if (els.histSlider) {
+      els.histSlider.addEventListener('input', () => {
+        const idx = Number(els.histSlider.value) | 0;
+        gotoHistory(state, idx);
+        hardRefreshAfterHistoryJump();
       });
     }
 
