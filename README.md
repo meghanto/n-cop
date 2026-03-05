@@ -12,6 +12,7 @@ Run locally:
 
 - open `webui/index.html` in your browser.
 
-Hosted (GitHub Pages):
+Hosted:
 
-- https://meghanto.github.io/n-cop/
+- https://ncop.meghanto.me/  (custom domain)
+- https://meghanto.github.io/n-cop/  (fallback)
