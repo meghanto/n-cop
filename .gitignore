@@ -1,1 +1,7 @@
+.DS_Store
 a.out
+*.o
+*.obj
+*.exe
+ncop
+ncop_bin

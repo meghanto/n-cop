@@ -1,0 +1,3475 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>n-cop Shannon Switching (Complete Graph) — Web UI</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #111a33;
+      --text: #e8eeff;
+      --muted: #a9b5e6;
+      --neutral: rgba(230, 236, 255, 0.14);
+      --neutral-strong: rgba(230, 236, 255, 0.30);
+      --blue: #4ea1ff;
+      --red: #ff5a67;
+      --node: #f2f5ff;
+      --node0: #ffd166;
+      --node1: #ffd166;
+      --win: #33d17a;
+      --lose: #ff5a67;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 800px at 50% 0%, #172353 0%, var(--bg) 50%, #070a14 100%);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+
+    header {
+      padding: 16px 20px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      background: rgba(17, 26, 51, 0.65);
+      backdrop-filter: blur(10px);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    header h1 {
+      margin: 0 0 6px 0;
+      font-size: 16px;
+      font-weight: 650;
+      letter-spacing: 0.2px;
+    }
+
+    header p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .wrap {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 16px;
+      padding: 16px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    .panel {
+      background: rgba(17, 26, 51, 0.72);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 14px;
+      padding: 14px;
+      box-shadow: 0 20px 80px rgba(0,0,0,0.35);
+    }
+
+    .panel h2 {
+      margin: 0 0 10px 0;
+      font-size: 13px;
+      font-weight: 650;
+      color: var(--muted);
+      letter-spacing: 0.2px;
+      text-transform: uppercase;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    input, select, button {
+      width: 100%;
+      padding: 10px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(0,0,0,0.20);
+      color: var(--text);
+      outline: none;
+      font-size: 14px;
+    }
+
+    button {
+      cursor: pointer;
+      background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.04));
+      transition: transform 0.04s ease, border-color 0.12s ease;
+      user-select: none;
+    }
+
+    .miniBtn {
+      width: auto;
+      padding: 6px 9px;
+      border-radius: 9px;
+      font-size: 12px;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .miniSelect {
+      width: auto;
+      padding: 6px 9px;
+      border-radius: 9px;
+      font-size: 12px;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .zoomLabel {
+      min-width: 46px;
+      text-align: right;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    button:hover { border-color: rgba(255,255,255,0.28); }
+    button:active { transform: translateY(1px); }
+    button[disabled] { cursor: not-allowed; opacity: 0.6; }
+
+    .btnRow { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+
+    .status {
+      padding: 10px;
+      border-radius: 10px;
+      background: rgba(0,0,0,0.18);
+      border: 1px solid rgba(255,255,255,0.10);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .movesBox {
+      margin-top: 12px;
+      padding: 10px;
+      border-radius: 10px;
+      background: rgba(0,0,0,0.18);
+      border: 1px solid rgba(255,255,255,0.10);
+      max-height: 220px;
+      overflow: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.35;
+      white-space: pre-wrap;
+    }
+
+    .movesBox .cop { color: var(--blue); font-weight: 700; }
+    .movesBox .robber { color: var(--red); font-weight: 700; }
+    .movesBox .num { color: var(--muted); }
+
+    .posText {
+      width: 100%;
+      min-height: 120px;
+      resize: vertical;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(0,0,0,0.22);
+      color: var(--fg);
+      padding: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .posBtnRow {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+
+    .posBtnRow button {
+      padding: 7px 10px;
+      border-radius: 10px;
+      font-size: 12px;
+    }
+
+    .posHelp {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .status strong { font-weight: 700; }
+    .status .cop { color: var(--blue); font-weight: 700; }
+    .status .robber { color: var(--red); font-weight: 700; }
+
+    .hint {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+      margin-top: 10px;
+    }
+
+    .legend {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 8px 10px;
+      align-items: center;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 4px;
+      border: 1px solid rgba(255,255,255,0.18);
+    }
+
+    .canvasWrap {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 10px;
+    }
+
+    .topBar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .thinking {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(0,0,0,0.22);
+      white-space: nowrap;
+    }
+    .thinkingDot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      animation: thinkingPulse 1s ease-in-out infinite;
+    }
+    @keyframes thinkingPulse {
+      0% { transform: scale(0.85); opacity: 0.55; }
+      50% { transform: scale(1.25); opacity: 1; }
+      100% { transform: scale(0.85); opacity: 0.55; }
+    }
+
+    .toggles { display: flex; gap: 10px; align-items: center; }
+    .toggles input { width: auto; }
+
+    canvas {
+      width: 100%;
+      height: 640px;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(0,0,0,0.22);
+      display: block;
+    }
+
+    @media (max-width: 980px) {
+      .wrap { grid-template-columns: 1fr; }
+      canvas { height: 540px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>n-cop Shannon Switching (Complete Graph) — 2-player Web UI</h1>
+    <p>Cop blocks up to <em>n</em> edges per turn (blue). Robber claims 1 edge per turn (red). Robber wins if red connects 0↔1. Cop wins if, even with all remaining unblocked edges, 0↔1 is disconnected.</p>
+  </header>
+
+  <div class="wrap">
+    <div class="panel">
+      <h2>Game</h2>
+
+      <div class="row">
+        <div>
+          <label for="k">Graph size (k)</label>
+          <input id="k" type="number" min="2" max="16" value="8" />
+        </div>
+        <div>
+          <label for="n">Cop edges per turn (n)</label>
+          <input id="n" type="number" min="1" max="8" value="2" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label for="showNeutral">Render neutral edges</label>
+          <select id="showNeutral">
+            <option value="all">All edges (dense)</option>
+            <option value="none" selected>Only claimed/blocked edges</option>
+          </select>
+        </div>
+        <div>
+          <label for="hitRadius">Click tolerance</label>
+          <input id="hitRadius" type="number" min="4" max="30" value="10" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label for="copView">Cop edges</label>
+          <select id="copView">
+            <option value="blue" selected>Show as blue edges</option>
+            <option value="delete">Deletions layout (hide blue)</option>
+            <option value="robber">Robber-attraction layout (hide blue)</option>
+          </select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="toggleCopView" type="button">Toggle cop view</button>
+        </div>
+      </div>
+
+      <div class="btnRow">
+        <button id="newGame">New game</button>
+        <button id="reset">Reset (same settings)</button>
+      </div>
+
+      <div class="btnRow">
+        <button id="endTurn">End Cop turn</button>
+        <button id="undo">Undo last move</button>
+      </div>
+
+      <div style="height: 10px"></div>
+
+      <div class="status" id="status"></div>
+
+      <div>
+        <h2 style="margin-top:14px">Moves</h2>
+        <div class="movesBox" id="moves"></div>
+      </div>
+
+      <div>
+        <h2 style="margin-top:14px">Position</h2>
+        <textarea id="posText" class="posText" spellcheck="false" placeholder="Export/Import a position here…"></textarea>
+        <div class="posBtnRow">
+          <button id="posExport" type="button">Export</button>
+          <button id="posImport" type="button">Import</button>
+          <button id="posCopy" type="button">Copy</button>
+          <button id="posCopyLink" type="button">Copy Link</button>
+        </div>
+        <div class="posHelp">Export uses the same move notation as the Moves list. “Copy Link” writes a URL hash like <code>#k=8&amp;n=2&amp;t=C&amp;l=2&amp;m=0-2~1-5.3-4~</code> which auto-loads on open.</div>
+      </div>
+
+      <div class="legend">
+        <div class="swatch" style="background: var(--blue)"></div><div id="copLegend">Cop (blocked edge)</div>
+        <div class="swatch" style="background: var(--red)"></div><div>Robber (claimed edge)</div>
+        <div class="swatch" style="background: rgba(230, 236, 255, 0.18)"></div><div>Neutral (unclaimed)</div>
+      </div>
+
+      <div class="hint">
+        <div><strong>How to play:</strong> Click an edge to claim/block it for the current player. Cop can click up to <em>n</em> edges on their turn (or press “End Cop turn”). Robber clicks exactly one edge.</div>
+        <div style="margin-top: 6px"><strong>Cop view:</strong> Switch to <em>deletions layout</em> to hide blue edges and recompute a force-directed layout from the same ring start each time. Use <em>robber-attraction</em> to additionally pull red-connected vertices closer.</div>
+        <div style="margin-top: 6px"><strong>Tip:</strong> Hide neutral edges for k≥10. Hold <strong>Shift</strong> and drag to pan. Use mouse wheel or +/- to zoom.</div>
+      </div>
+    </div>
+
+    <div class="canvasWrap">
+      <div class="topBar">
+        <div id="smallInfo"></div>
+        <div id="aiThinking" class="thinking"><span id="aiThinkingDot" class="thinkingDot"></span><span id="aiThinkingText">AI thinking…</span></div>
+        <div class="toggles">
+          <label style="display:flex; align-items:center; gap:8px; margin:0; color: var(--muted);">
+            <input id="labels" type="checkbox" checked /> Node labels
+          </label>
+          <label style="display:flex; align-items:center; gap:8px; margin:0; color: var(--muted);">
+            <input id="highlight01" type="checkbox" checked /> Highlight (0,1)
+          </label>
+          <label style="display:flex; align-items:center; gap:8px; margin:0; color: var(--muted);">
+            <input id="autoCop" type="checkbox" /> Auto cop
+          </label>
+          <label style="display:flex; align-items:center; gap:8px; margin:0; color: var(--muted);">
+            <input id="autoRobber" type="checkbox" /> Auto robber
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; margin:0 0 0 8px; color: var(--muted);">
+            Think
+            <select id="thinkMode" class="miniSelect" title="AI search depth / time">
+              <option value="light">Light</option>
+              <option value="deep" selected>Deep</option>
+            </select>
+          </label>
+          <div style="display:flex; align-items:center; gap:6px; margin-left:8px;">
+            <button id="zoomOut" class="miniBtn" type="button" title="Zoom out">−</button>
+            <button id="zoomIn" class="miniBtn" type="button" title="Zoom in">+</button>
+            <button id="zoomReset" class="miniBtn" type="button" title="Reset view">Reset</button>
+            <span id="zoomLabel" class="zoomLabel">100%</span>
+          </div>
+        </div>
+      </div>
+
+      <canvas id="board" width="1200" height="800"></canvas>
+    </div>
+  </div>
+
+  <script>
+    // --- Model ----------------------------------------------------------------
+    const COP = 'cop';
+    const ROBBER = 'robber';
+
+    function edgeKey(u, v) {
+      return u < v ? `${u},${v}` : `${v},${u}`;
+    }
+
+    function parseEdgeKey(key) {
+      const [a, b] = key.split(',').map(Number);
+      return [a, b];
+    }
+
+    function makeState(k, n) {
+      return {
+        k,
+        n,
+        turn: COP,
+        copMovesLeft: n,
+        // store edges in sets of keys "u,v" with u<v
+        blue: new Set(),
+        red: new Set(),
+        // move list, grouped like chess: rounds[i] has cop edges (0..n) and robber edge (0/1)
+        moveRounds: [{ cop: [], robber: null }],
+        undoStack: [], // stack of snapshots for Undo
+        gameOver: false,
+        winner: null,
+      };
+    }
+
+    function cloneMoveRounds(rounds) {
+      return rounds.map(r => ({
+        cop: r.cop.map(e => ({ u: e.u, v: e.v })),
+        robber: r.robber ? ({ u: r.robber.u, v: r.robber.v }) : null,
+      }));
+    }
+
+    function snapshotForUndo(state) {
+      return {
+        turn: state.turn,
+        copMovesLeft: state.copMovesLeft,
+        blue: new Set(state.blue),
+        red: new Set(state.red),
+        moveRounds: cloneMoveRounds(state.moveRounds),
+        gameOver: state.gameOver,
+        winner: state.winner,
+      };
+    }
+
+    function restoreFromUndoSnapshot(state, snap) {
+      state.turn = snap.turn;
+      state.copMovesLeft = snap.copMovesLeft;
+      state.blue = new Set(snap.blue);
+      state.red = new Set(snap.red);
+      state.moveRounds = cloneMoveRounds(snap.moveRounds || [{ cop: [], robber: null }]);
+      state.gameOver = snap.gameOver;
+      state.winner = snap.winner;
+    }
+
+    function isLegal(state, u, v) {
+      if (u === v) return false;
+      if (u < 0 || v < 0 || u >= state.k || v >= state.k) return false;
+      const key = edgeKey(u, v);
+      return !state.blue.has(key) && !state.red.has(key);
+    }
+
+    function availableAdjMask(state) {
+      // adjacency for "not blue" (neutral + red). Returns array of bitmasks.
+      const k = state.k;
+      const fullMask = (k === 32) ? 0xFFFFFFFF : ((1 << k) - 1);
+      const adj = new Array(k).fill(0);
+      for (let u = 0; u < k; u++) {
+        for (let v = u + 1; v < k; v++) {
+          const key = edgeKey(u, v);
+          if (state.blue.has(key)) continue;
+          adj[u] |= (1 << v);
+          adj[v] |= (1 << u);
+        }
+      }
+      // clamp
+      for (let i = 0; i < k; i++) adj[i] &= fullMask;
+      return adj;
+    }
+
+    function redAdjMask(state) {
+      const k = state.k;
+      const adj = new Array(k).fill(0);
+      for (const key of state.red) {
+        const [u, v] = parseEdgeKey(key);
+        adj[u] |= (1 << v);
+        adj[v] |= (1 << u);
+      }
+      return adj;
+    }
+
+    function connected(adj, k, s, t) {
+      let visited = 0;
+      let frontier = (1 << s);
+      visited |= frontier;
+      while (frontier) {
+        // early exit
+        if (visited & (1 << t)) return true;
+        let next = 0;
+        let f = frontier;
+        while (f) {
+          const lsb = f & -f;
+          const u = 31 - Math.clz32(lsb); // index of lowest-set bit
+          next |= adj[u];
+          f ^= lsb;
+        }
+        next &= ~visited;
+        visited |= next;
+        frontier = next;
+      }
+      return (visited & (1 << t)) !== 0;
+    }
+
+    function popcnt32(x) {
+      x = x - ((x >>> 1) & 0x55555555);
+      x = (x & 0x33333333) + ((x >>> 2) & 0x33333333);
+      return (((x + (x >>> 4)) & 0x0F0F0F0F) * 0x01010101) >>> 24;
+    }
+
+    function componentMaskFromAdj(adj, start) {
+      // BFS bitmask of the component containing 'start'
+      let visited = 0;
+      let frontier = (1 << start);
+      visited |= frontier;
+      while (frontier) {
+        let next = 0;
+        let f = frontier;
+        while (f) {
+          const lsb = f & -f;
+          const u = 31 - Math.clz32(lsb);
+          next |= adj[u];
+          f ^= lsb;
+        }
+        next &= ~visited;
+        visited |= next;
+        frontier = next;
+      }
+      return visited;
+    }
+
+    function robberHasWon(state) {
+      const adj = redAdjMask(state);
+      return connected(adj, state.k, 0, 1);
+    }
+
+    function copHasWon(state) {
+      const adj = availableAdjMask(state);
+      return !connected(adj, state.k, 0, 1);
+    }
+
+    function recomputeGameOver(state) {
+      if (robberHasWon(state)) {
+        state.gameOver = true;
+        state.winner = ROBBER;
+        return;
+      }
+      if (copHasWon(state)) {
+        state.gameOver = true;
+        state.winner = COP;
+        return;
+      }
+      state.gameOver = false;
+      state.winner = null;
+    }
+
+    function endTurn(state) {
+      if (state.gameOver) return;
+      if (state.turn === COP) {
+        state.turn = ROBBER;
+        state.copMovesLeft = state.n;
+      } else {
+        state.turn = COP;
+        state.copMovesLeft = state.n;
+      }
+    }
+
+    function applyMove(state, u, v) {
+      if (state.gameOver) return { ok: false, reason: 'game over' };
+      if (!isLegal(state, u, v)) return { ok: false, reason: 'illegal edge' };
+      const key = edgeKey(u, v);
+
+      if (state.turn === COP) {
+        if (state.copMovesLeft <= 0) return { ok: false, reason: 'no cop moves left' };
+        // record snapshot for undo
+        state.undoStack.push(snapshotForUndo(state));
+        state.blue.add(key);
+        recordMove(state, COP, u, v);
+        state.copMovesLeft--;
+        recomputeGameOver(state);
+        if (!state.gameOver && state.copMovesLeft === 0) endTurn(state);
+        if (els.copView && els.copView.value !== 'blue') forceNeedsRelax = true;
+        return { ok: true };
+      } else {
+        // record snapshot for undo
+        state.undoStack.push(snapshotForUndo(state));
+        state.red.add(key);
+        recordMove(state, ROBBER, u, v);
+        recomputeGameOver(state);
+        if (!state.gameOver) {
+          endTurn(state);
+          // start a new round after the robber move
+          if (!state.moveRounds || !state.moveRounds.length) state.moveRounds = [{ cop: [], robber: null }];
+          state.moveRounds.push({ cop: [], robber: null });
+        }
+        // In robber-attraction layout, robber edges affect the layout.
+        if (els.copView && els.copView.value === 'robber') forceNeedsRelax = true;
+        return { ok: true };
+      }
+    }
+
+    function undo(state) {
+      if (!state.undoStack.length) return;
+      const blueBefore = state.blue.size;
+      const redBefore = state.red.size;
+      const snap = state.undoStack.pop();
+      restoreFromUndoSnapshot(state, snap);
+
+      if (els.copView) {
+        const v = els.copView.value;
+        if (v === 'delete' && state.blue.size !== blueBefore) forceNeedsRelax = true;
+        if (v === 'robber' && (state.blue.size !== blueBefore || state.red.size !== redBefore)) forceNeedsRelax = true;
+      }
+    }
+
+    // --- Robber AI ------------------------------------------------------------
+    function robberMajorityMinorityMove(state) {
+      // Component-level generalization of your heuristic.
+      // Let C0, C1 be the robber red components containing 0 and 1.
+      // Among *other* red components D (including singletons), find a D that has:
+      //   - at least one legal edge to each of C0 and C1
+      //   - a majority of available edges to one side and a minority to the other (as fractions)
+      // Then claim an edge from the *minority* side to D (merging D into that side).
+      const k = state.k;
+      if (k > 30) return null;
+
+      const { comps, compOf } = computeRedComponents(state);
+      const c0 = compOf[0];
+      const c1 = compOf[1];
+      if (c0 < 0 || c1 < 0) return null;
+      if (c0 === c1) return null; // already connected (should be gameOver)
+
+      const C0 = comps[c0];
+      const C1 = comps[c1];
+
+      function countLegalEdgesBetween(A, B) {
+        let cnt = 0;
+        let cand = null;
+        for (const u of A) {
+          for (const v of B) {
+            if (!isLegal(state, u, v)) continue;
+            cnt++;
+            if (!cand) cand = { u, v };
+          }
+        }
+        return { cnt, cand };
+      }
+
+      // 1) Immediate win: any free edge between C0 and C1.
+      {
+        const { cand } = countLegalEdgesBetween(C0, C1);
+        if (cand) return cand;
+      }
+
+      const max01 = C0.length * C1.length;
+      if (max01 === 0) return null;
+
+      let best = null; // {score, move:{u,v}}
+      for (let d = 0; d < comps.length; d++) {
+        if (d === c0 || d === c1) continue;
+        const D = comps[d];
+        if (!D.length) continue;
+
+        const a0 = countLegalEdgesBetween(D, C0).cnt;
+        const a1 = countLegalEdgesBetween(D, C1).cnt;
+        if (a0 === 0 || a1 === 0) continue; // must touch both sides
+
+        // Fractions of remaining edges among all possible cross edges.
+        const f0 = a0 / (D.length * C0.length);
+        const f1 = a1 / (D.length * C1.length);
+
+        // Majority/minority rule (strict)
+        // If D is majority-connected to C0 and minority-connected to C1, merge D into C1.
+        if (f0 > 0.5 && f1 < 0.5) {
+          const cand = countLegalEdgesBetween(D, C1).cand; // edge to minority side (C1)
+          if (cand) {
+            const score = (f0 - f1) + 0.001 * a0;
+            if (!best || score > best.score) best = { score, move: cand };
+          }
+        }
+
+        // If D is majority-connected to C1 and minority-connected to C0, merge D into C0.
+        if (f1 > 0.5 && f0 < 0.5) {
+          const cand = countLegalEdgesBetween(D, C0).cand;
+          if (cand) {
+            const score = (f1 - f0) + 0.001 * a1;
+            if (!best || score > best.score) best = { score, move: cand };
+          }
+        }
+      }
+
+      return best ? best.move : null;
+    }
+
+    function robberPaperMove(state) {
+      // Fallback to the simple alternating-growth strategy from the paper.
+      const k = state.k;
+      if (k > 30) return null;
+
+      const full = (1 << k) - 1;
+      const adjRed = redAdjMask(state);
+      const C0 = componentMaskFromAdj(adjRed, 0);
+      const C1 = componentMaskFromAdj(adjRed, 1);
+      if ((C0 >>> 1) & 1) return null;
+
+      // 1) Immediate win: any free edge between C0 and C1.
+      let m0 = C0;
+      while (m0) {
+        const lsb0 = m0 & -m0;
+        const u = 31 - Math.clz32(lsb0);
+        m0 ^= lsb0;
+
+        let m1 = C1;
+        while (m1) {
+          const lsb1 = m1 & -m1;
+          const v = 31 - Math.clz32(lsb1);
+          m1 ^= lsb1;
+          if (isLegal(state, u, v)) return { u, v };
+        }
+      }
+
+      const O = full & ~(C0 | C1);
+
+      // 2) Expand alternately: odd robber turns grow C0, even turns grow C1.
+      const t = state.red.size + 1;
+      const target = (t & 1) ? C0 : C1;
+
+      let mt = target;
+      while (mt) {
+        const lsb = mt & -mt;
+        const u = 31 - Math.clz32(lsb);
+        mt ^= lsb;
+
+        let mo = O;
+        while (mo) {
+          const lsbo = mo & -mo;
+          const x = 31 - Math.clz32(lsbo);
+          mo ^= lsbo;
+          if (isLegal(state, u, x)) return { u, v: x };
+        }
+      }
+
+      // 3) Fallback: any legal edge.
+      for (let u = 0; u < k; u++) {
+        for (let v = u + 1; v < k; v++) {
+          if (isLegal(state, u, v)) return { u, v };
+        }
+      }
+
+      return null;
+    }
+
+    function robberSmartMove(state, budgetMs = 80, maxCandidates = 26) {
+      // 2-ply search: try a set of plausible robber edges, assume cop replies optimally
+      // (against robber's current policy) by choosing up to n deletions, then pick the
+      // robber move that maximizes evalForRobber.
+      if (state.gameOver || state.turn !== ROBBER) return null;
+
+      const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      function timeUp() {
+        const t = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        return (t - t0) > budgetMs;
+      }
+
+      const { comps, compOf } = computeRedComponents(state);
+      const c0 = compOf[0];
+      const c1 = compOf[1];
+      if (c0 < 0 || c1 < 0) return null;
+      if (c0 === c1) return null;
+
+      const C0 = comps[c0];
+      const C1 = comps[c1];
+
+      function countAndPick(A, B) {
+        let cnt = 0;
+        let cand = null;
+        for (const u of A) {
+          for (const v of B) {
+            if (!isLegal(state, u, v)) continue;
+            cnt++;
+            if (!cand) cand = { u, v };
+          }
+        }
+        return { cnt, cand };
+      }
+
+      // Immediate win.
+      {
+        const { cand } = countAndPick(C0, C1);
+        if (cand) return cand;
+      }
+
+      // Candidate generation (component-aware).
+      const candMoves = [];
+      const seen = new Set();
+      function addMove(mv, score) {
+        if (!mv) return;
+        let { u, v } = mv;
+        if (u === v) return;
+        if (u > v) { const t = u; u = v; v = t; }
+        if (!isLegal(state, u, v)) return;
+        const key = edgeKey(u, v);
+        if (seen.has(key)) return;
+        seen.add(key);
+        candMoves.push({ u, v, score });
+      }
+
+      // Heuristic favorites.
+      addMove(robberMajorityMinorityMove(state), 10000);
+      addMove(robberPaperMove(state), 9000);
+
+      // For each outside red component D, consider merging D into either side.
+      for (let d = 0; d < comps.length; d++) {
+        if (d === c0 || d === c1) continue;
+        const D = comps[d];
+        if (!D.length) continue;
+
+        const to0 = countAndPick(D, C0);
+        const to1 = countAndPick(D, C1);
+        if (to0.cnt === 0 && to1.cnt === 0) continue;
+
+        // If we merge D into C0, then "pressure" on C1 roughly scales with remaining edges D-C1.
+        if (to0.cand) addMove(to0.cand, 100 + 6 * to1.cnt + 0.2 * D.length);
+        if (to1.cand) addMove(to1.cand, 100 + 6 * to0.cnt + 0.2 * D.length);
+      }
+
+      // Cap candidates.
+      candMoves.sort((a, b) => b.score - a.score);
+      const moves = candMoves.slice(0, Math.max(1, maxCandidates));
+
+      // Beam-search against a strong cop reply (keeps it fast on k up to 16).
+      // Phase 1: cheap pre-score (robber move only)
+      const pre = [];
+      for (const mv of moves) {
+        if (timeUp()) break;
+        const sim = cloneStateForSim(state);
+        applyMoveSim(sim, mv.u, mv.v);
+        if (sim.gameOver) {
+          if (sim.winner === ROBBER) return { u: mv.u, v: mv.v };
+          continue;
+        }
+        pre.push({ mv, preScore: evalForRobber(sim) });
+      }
+      pre.sort((a, b) => b.preScore - a.preScore);
+      const beam = pre.slice(0, 7);
+
+      // Phase 2: evaluate with cop best response
+      let best = null;
+      let bestScore = -Infinity;
+      for (const item of beam) {
+        if (timeUp()) break;
+        const mv = item.mv;
+
+        const sim = cloneStateForSim(state);
+        applyMoveSim(sim, mv.u, mv.v);
+        if (sim.gameOver) {
+          if (sim.winner === ROBBER) return { u: mv.u, v: mv.v };
+          continue;
+        }
+
+        if (sim.turn === COP) {
+          const set = copBestMoveSetOnePly(sim, 18, 12);
+          for (const e of set) {
+            if (sim.gameOver || sim.turn !== COP || sim.copMovesLeft <= 0) break;
+            applyMoveSim(sim, e.u, e.v);
+          }
+          if (!sim.gameOver && sim.turn === COP) endTurn(sim);
+        }
+
+        const sc = evalForRobber(sim);
+        if (sc > bestScore) {
+          bestScore = sc;
+          best = { u: mv.u, v: mv.v };
+        }
+      }
+
+      return best || robberMajorityMinorityMove(state) || robberPaperMove(state);
+    }
+
+    function recordMove(state, player, u, v) {
+      if (!state.moveRounds || !state.moveRounds.length) state.moveRounds = [{ cop: [], robber: null }];
+      const a = Math.min(u, v);
+      const b = Math.max(u, v);
+      const cur = state.moveRounds[state.moveRounds.length - 1];
+      if (player === COP) {
+        cur.cop.push({ u: a, v: b });
+      } else {
+        cur.robber = { u: a, v: b };
+      }
+    }
+
+    // --- View -----------------------------------------------------------------
+    const els = {
+      k: document.getElementById('k'),
+      n: document.getElementById('n'),
+      showNeutral: document.getElementById('showNeutral'),
+      hitRadius: document.getElementById('hitRadius'),
+      copView: document.getElementById('copView'),
+      toggleCopView: document.getElementById('toggleCopView'),
+      labels: document.getElementById('labels'),
+      highlight01: document.getElementById('highlight01'),
+      autoCop: document.getElementById('autoCop'),
+      autoRobber: document.getElementById('autoRobber'),
+      thinkMode: document.getElementById('thinkMode'),
+      zoomIn: document.getElementById('zoomIn'),
+      zoomOut: document.getElementById('zoomOut'),
+      zoomReset: document.getElementById('zoomReset'),
+      zoomLabel: document.getElementById('zoomLabel'),
+      aiThinking: document.getElementById('aiThinking'),
+      aiThinkingText: document.getElementById('aiThinkingText'),
+      aiThinkingDot: document.getElementById('aiThinkingDot'),
+      newGame: document.getElementById('newGame'),
+      reset: document.getElementById('reset'),
+      endTurn: document.getElementById('endTurn'),
+      undo: document.getElementById('undo'),
+      status: document.getElementById('status'),
+      moves: document.getElementById('moves'),
+      posText: document.getElementById('posText'),
+      posExport: document.getElementById('posExport'),
+      posImport: document.getElementById('posImport'),
+      posCopy: document.getElementById('posCopy'),
+      posCopyLink: document.getElementById('posCopyLink'),
+      copLegend: document.getElementById('copLegend'),
+      smallInfo: document.getElementById('smallInfo'),
+      canvas: document.getElementById('board'),
+    };
+
+    const ctx = els.canvas.getContext('2d');
+
+    let state = makeState(8, 2);
+    let layout = null; // { nodes: [{x,y}], edges: [{u,v,x1,y1,x2,y2}] }
+    let hoverEdge = null; // {u,v} or null
+    let hoverNode = null; // vertex index or null
+
+    let forceAnimRunning = false;
+    let forceNeedsRelax = false;
+    let autoCopScheduled = false;
+    let autoRobberScheduled = false;
+
+    // View transform for zoom/pan (screen = world * scale + offset)
+    let view = { scale: 1, offsetX: 0, offsetY: 0 };
+
+    function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+
+    function screenToWorld(x, y) {
+      return {
+        x: (x - view.offsetX) / view.scale,
+        y: (y - view.offsetY) / view.scale,
+      };
+    }
+
+    function setViewScale(newScale, screenCx, screenCy) {
+      const s = clamp(newScale, 0.25, 4.0);
+      const w = screenToWorld(screenCx, screenCy);
+      view.scale = s;
+      view.offsetX = screenCx - w.x * s;
+      view.offsetY = screenCy - w.y * s;
+      if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
+    }
+
+    function setAIThinking(on, who) {
+      if (!els.aiThinking) return;
+      if (!on) {
+        els.aiThinking.style.display = 'none';
+        return;
+      }
+      const mode = (els.thinkMode && els.thinkMode.value) ? els.thinkMode.value : 'deep';
+      const base = who === COP ? 'Cop AI thinking' : (who === ROBBER ? 'Robber AI thinking' : 'AI thinking');
+      const label = `${base} (${mode})…`;
+      if (els.aiThinkingText) els.aiThinkingText.textContent = label;
+      if (els.aiThinkingDot) {
+        const col = who === COP
+          ? getComputedStyle(document.documentElement).getPropertyValue('--blue').trim()
+          : getComputedStyle(document.documentElement).getPropertyValue('--red').trim();
+        els.aiThinkingDot.style.background = col || 'var(--muted)';
+      }
+      els.aiThinking.style.display = 'flex';
+    }
+
+    function resetView() {
+      view.scale = 1;
+      view.offsetX = 0;
+      view.offsetY = 0;
+      if (els.zoomLabel) els.zoomLabel.textContent = '100%';
+    }
+
+    function currentLayoutMode() {
+      const v = (els.copView && els.copView.value) ? els.copView.value : 'blue';
+      return (v === 'blue') ? 'circle' : 'force';
+    }
+
+    function computeCompleteEdges(k) {
+      const edges = [];
+      for (let u = 0; u < k; u++) {
+        for (let v = u + 1; v < k; v++) edges.push({ u, v });
+      }
+      return edges;
+    }
+
+    function computeCircleNodes(k) {
+      const w = els.canvas.width;
+      const h = els.canvas.height;
+      const cx = w * 0.5;
+      const cy = h * 0.5;
+      const radius = Math.min(w, h) * 0.36;
+
+      const nodes = [];
+      for (let i = 0; i < k; i++) {
+        const a = (-Math.PI / 2) + (i * 2 * Math.PI / k);
+        nodes.push({
+          x: cx + Math.cos(a) * radius,
+          y: cy + Math.sin(a) * radius,
+        });
+      }
+      return nodes;
+    }
+
+    // --- Deletions-view layout ------------------------------------------------
+    // Deletions view: standard force-directed layout (node repulsion + springs on remaining edges),
+    // recomputed from scratch from the same ring start each time.
+
+    function remainingNeighborMasks() {
+      const k = layout.k;
+      const full = (1 << k) - 1;
+      const masks = new Array(k);
+      for (let u = 0; u < k; u++) masks[u] = full & ~(1 << u);
+      for (const key of state.blue) {
+        const [u, v] = parseEdgeKey(key);
+        masks[u] &= ~(1 << v);
+        masks[v] &= ~(1 << u);
+      }
+      return masks;
+    }
+
+    function computeDeletionViewLayoutFromRing() {
+      // Simple force-directed layout.
+      // Each recompute starts from the same ring positions (computeCircleNodes).
+      const k = layout.k;
+      const ring = computeCircleNodes(k);
+      const masks = remainingNeighborMasks();
+
+      let redEdges = null;
+      if (els.copView && els.copView.value === 'robber') {
+        redEdges = [];
+        for (const key of state.red) {
+          const [u, v] = parseEdgeKey(key);
+          // should always be remaining, but keep it robust
+          if (((masks[u] >>> v) & 1) && ((masks[v] >>> u) & 1)) redEdges.push([u, v]);
+        }
+      }
+
+      return convergeForceLayout(ring, masks, ring, redEdges);
+    }
+
+    function convergeForceLayout(startNodes, masks, restRefNodes, redEdges) {
+      // "Normal" force layout:
+      // - vertex-vertex repulsion
+      // - edge springs for remaining edges
+      // - optional extra attraction for robber-red edges (redEdges)
+      // Rest length of each spring is taken from the initial ring geometry (restRefNodes),
+      // so the complete graph's equilibrium is the ring.
+      const k = layout.k;
+      const nodes = startNodes.map(p => ({ x: p.x, y: p.y }));
+
+      const w = els.canvas.width;
+      const h = els.canvas.height;
+      const cx = w * 0.5;
+      const cy = h * 0.5;
+      const padding = 28;
+
+      const area = w * h;
+      const ideal = Math.sqrt(area / Math.max(1, k)) * 0.90;
+
+      const repelK = ideal * ideal * 0.85;
+      const springK = 0.010;
+      const redSpringK = 0.028;
+      const redRestMul = 0.55;
+      const gravityK = 0.0006;
+      const damping = 0.82;
+      const maxSpeed = 16;
+
+      // Remaining edges list (u<v)
+      const edges = [];
+      for (let u = 0; u < k; u++) {
+        let neigh = masks[u] & ~((1 << (u + 1)) - 1);
+        while (neigh) {
+          const lsb = neigh & -neigh;
+          const v = 31 - Math.clz32(lsb);
+          neigh ^= lsb;
+          edges.push([u, v]);
+        }
+      }
+
+      const vx = new Array(k).fill(0);
+      const vy = new Array(k).fill(0);
+
+      for (let iter = 0; iter < 1400; iter++) {
+        const fx = new Array(k).fill(0);
+        const fy = new Array(k).fill(0);
+
+        // Vertex repulsion
+        for (let i = 0; i < k; i++) {
+          for (let j = i + 1; j < k; j++) {
+            let dx = nodes[i].x - nodes[j].x;
+            let dy = nodes[i].y - nodes[j].y;
+            const dist = Math.hypot(dx, dy) + 0.01;
+            const f = repelK / (dist * dist);
+            dx /= dist;
+            dy /= dist;
+            fx[i] += dx * f;
+            fy[i] += dy * f;
+            fx[j] -= dx * f;
+            fy[j] -= dy * f;
+          }
+        }
+
+        // Edge springs (remaining edges only)
+        for (const [u, v] of edges) {
+          let dx = nodes[u].x - nodes[v].x;
+          let dy = nodes[u].y - nodes[v].y;
+          const dist = Math.hypot(dx, dy) + 0.01;
+          dx /= dist;
+          dy /= dist;
+
+          const rest = Math.hypot(restRefNodes[u].x - restRefNodes[v].x,
+                                 restRefNodes[u].y - restRefNodes[v].y);
+          const stretch = dist - rest;
+          const f = springK * stretch;
+
+          fx[u] -= dx * f;
+          fy[u] -= dy * f;
+          fx[v] += dx * f;
+          fy[v] += dy * f;
+        }
+
+        // Extra attraction for robber edges (optional)
+        if (redEdges && redEdges.length) {
+          for (const [u, v] of redEdges) {
+            let dx = nodes[u].x - nodes[v].x;
+            let dy = nodes[u].y - nodes[v].y;
+            const dist = Math.hypot(dx, dy) + 0.01;
+            dx /= dist;
+            dy /= dist;
+
+            const baseRest = Math.hypot(restRefNodes[u].x - restRefNodes[v].x,
+                                       restRefNodes[u].y - restRefNodes[v].y);
+            const rest = baseRest * redRestMul;
+            const stretch = dist - rest;
+            const f = redSpringK * stretch;
+
+            fx[u] -= dx * f;
+            fy[u] -= dy * f;
+            fx[v] += dx * f;
+            fy[v] += dy * f;
+          }
+        }
+
+        // Gentle gravity to the center (prevents drift / keeps within view)
+        for (let i = 0; i < k; i++) {
+          fx[i] += (cx - nodes[i].x) * gravityK;
+          fy[i] += (cy - nodes[i].y) * gravityK;
+        }
+
+        // Integrate
+        let avgSpeed = 0;
+        for (let i = 0; i < k; i++) {
+          vx[i] = (vx[i] + fx[i]) * damping;
+          vy[i] = (vy[i] + fy[i]) * damping;
+
+          let sp = Math.hypot(vx[i], vy[i]);
+          if (sp > maxSpeed) {
+            const s = maxSpeed / sp;
+            vx[i] *= s;
+            vy[i] *= s;
+            sp = maxSpeed;
+          }
+
+          nodes[i].x += vx[i];
+          nodes[i].y += vy[i];
+
+          if (nodes[i].x < padding) { nodes[i].x = padding; vx[i] *= -0.35; }
+          if (nodes[i].x > w - padding) { nodes[i].x = w - padding; vx[i] *= -0.35; }
+          if (nodes[i].y < padding) { nodes[i].y = padding; vy[i] *= -0.35; }
+          if (nodes[i].y > h - padding) { nodes[i].y = h - padding; vy[i] *= -0.35; }
+
+          avgSpeed += sp;
+        }
+
+        avgSpeed /= Math.max(1, k);
+        if (iter > 60 && avgSpeed < 0.06) break;
+      }
+
+      return nodes;
+    }
+
+    function restartForceLayout() {
+      if (!layout || layout.mode !== 'force') return;
+
+      // Recompute layout from scratch each time.
+      // The solver itself always starts from the ring (inside computeDeletionViewLayoutFromRing()).
+      const from = layout.nodes.map(p => ({ x: p.x, y: p.y }));
+      const to = computeDeletionViewLayoutFromRing();
+
+      let maxD = 0;
+      for (let i = 0; i < to.length; i++) {
+        const d = Math.hypot(to[i].x - from[i].x, to[i].y - from[i].y);
+        if (d > maxD) maxD = d;
+      }
+
+      if (maxD < 0.5) {
+        layout.transition = null;
+        return;
+      }
+
+      // Smoothly transition to the new converged layout.
+      const durMs = Math.max(700, Math.min(2800, 700 + maxD * 5.0));
+      layout.transition = {
+        from,
+        to,
+        startMs: performance.now(),
+        durMs,
+      };
+
+      if (!forceAnimRunning) {
+        forceAnimRunning = true;
+        requestAnimationFrame(tickLayoutTransition);
+      }
+    }
+
+    function ensureLayout(k) {
+      const mode = currentLayoutMode();
+      const needNew = !layout || layout.k !== k || layout.mode !== mode;
+
+      if (needNew) {
+        const edges = computeCompleteEdges(k);
+        if (mode === 'circle') {
+          layout = { k, mode, nodes: computeCircleNodes(k), edges, transition: null };
+        } else {
+          layout = { k, mode, nodes: computeCircleNodes(k), edges, transition: null };
+          restartForceLayout();
+        }
+        return;
+      }
+
+      if (mode === 'circle') {
+        layout.nodes = computeCircleNodes(k);
+        layout.transition = null;
+        return;
+      }
+
+      if (forceNeedsRelax) {
+        forceNeedsRelax = false;
+        restartForceLayout();
+      }
+    }
+
+    function tickLayoutTransition(ts) {
+      if (!layout || layout.mode !== 'force' || !layout.transition) {
+        forceAnimRunning = false;
+        return;
+      }
+
+      const tr = layout.transition;
+      const t = Math.max(0, Math.min(1, (ts - tr.startMs) / tr.durMs));
+      // smoothstep easing
+      const e = t * t * (3 - 2 * t);
+
+      for (let i = 0; i < layout.k; i++) {
+        layout.nodes[i].x = tr.from[i].x + (tr.to[i].x - tr.from[i].x) * e;
+        layout.nodes[i].y = tr.from[i].y + (tr.to[i].y - tr.from[i].y) * e;
+      }
+
+      if (t >= 1) {
+        layout.transition = null;
+      }
+
+      draw();
+
+      if (layout.transition) {
+        requestAnimationFrame(tickLayoutTransition);
+      } else {
+        forceAnimRunning = false;
+      }
+    }
+
+    function distToSegment(px, py, x1, y1, x2, y2) {
+      // Return distance from p to segment (x1,y1)-(x2,y2)
+      const vx = x2 - x1, vy = y2 - y1;
+      const wx = px - x1, wy = py - y1;
+      const c1 = vx * wx + vy * wy;
+      if (c1 <= 0) return Math.hypot(px - x1, py - y1);
+      const c2 = vx * vx + vy * vy;
+      if (c2 <= c1) return Math.hypot(px - x2, py - y2);
+      const t = c1 / c2;
+      const projx = x1 + t * vx;
+      const projy = y1 + t * vy;
+      return Math.hypot(px - projx, py - projy);
+    }
+
+    function draw() {
+      const k = state.k;
+      ensureLayout(k);
+
+      const w = els.canvas.width;
+      const h = els.canvas.height;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+
+      // background grid-ish
+      ctx.save();
+      ctx.globalAlpha = 0.12;
+      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+      ctx.lineWidth = 1;
+      for (let x = 40; x < w; x += 80) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      }
+      for (let y = 40; y < h; y += 80) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+      }
+      ctx.restore();
+
+      // Apply zoom/pan for graph drawing (keep background grid in screen space)
+      ctx.save();
+      ctx.setTransform(view.scale, 0, 0, view.scale, view.offsetX, view.offsetY);
+
+      const nodes = layout.nodes;
+
+      const showNeutral = (els.showNeutral.value === 'all');
+      const copView = (els.copView && els.copView.value) ? els.copView.value : 'blue';
+
+      // If hovering a vertex, highlight its directly-connected (non-blue) neighbors.
+      let hoverNbrs = 0;
+      if (hoverNode !== null && !state.gameOver) {
+        const adj = availableAdjMask(state);
+        hoverNbrs = adj[hoverNode] || 0;
+      }
+
+      // Draw neutral edges first
+      if (showNeutral) {
+        ctx.save();
+        ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--neutral').trim();
+        ctx.lineWidth = 1;
+        for (const e of layout.edges) {
+          const key = edgeKey(e.u, e.v);
+          if (state.blue.has(key) || state.red.has(key)) continue;
+          const a = nodes[e.u], b = nodes[e.v];
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      // Draw blue edges (optional)
+      if (copView === 'blue') {
+        ctx.save();
+        ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--blue').trim();
+        ctx.lineWidth = 3;
+        for (const key of state.blue) {
+          const [u, v] = parseEdgeKey(key);
+          const a = nodes[u], b = nodes[v];
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      // Draw red edges
+      ctx.save();
+      ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--red').trim();
+      ctx.lineWidth = 3;
+      for (const key of state.red) {
+        const [u, v] = parseEdgeKey(key);
+        const a = nodes[u], b = nodes[v];
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // Hover vertex highlight: show the directly-connected (non-blue) edges.
+      if (hoverNode !== null && hoverNbrs) {
+        const a = nodes[hoverNode];
+        ctx.save();
+        ctx.globalAlpha = 0.55;
+        ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+        ctx.lineWidth = 5;
+        ctx.setLineDash([9, 7]);
+        for (let v = 0; v < k; v++) {
+          if (v === hoverNode) continue;
+          if (!((hoverNbrs >>> v) & 1)) continue;
+          const b = nodes[v];
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // Hover highlight (helps selecting an edge in dense graphs)
+      if (hoverEdge && !state.gameOver) {
+        const { u, v } = hoverEdge;
+        const a = nodes[u], b = nodes[v];
+        const legal = isLegal(state, u, v);
+        ctx.save();
+        ctx.globalAlpha = legal ? 0.65 : 0.25;
+        ctx.strokeStyle = (state.turn === COP)
+          ? getComputedStyle(document.documentElement).getPropertyValue('--blue').trim()
+          : getComputedStyle(document.documentElement).getPropertyValue('--red').trim();
+        ctx.lineWidth = 6;
+        ctx.setLineDash([8, 6]);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // Nodes
+      for (let i = 0; i < k; i++) {
+        const p = nodes[i];
+        const is01 = (i === 0 || i === 1);
+        const highlight01 = els.highlight01.checked;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, is01 && highlight01 ? 12 : 10, 0, Math.PI * 2);
+        ctx.fillStyle = is01 && highlight01
+          ? getComputedStyle(document.documentElement).getPropertyValue('--node0').trim()
+          : getComputedStyle(document.documentElement).getPropertyValue('--node').trim();
+        ctx.shadowColor = 'rgba(0,0,0,0.4)';
+        ctx.shadowBlur = 10;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+        ctx.stroke();
+        ctx.restore();
+
+        // Hover neighbor highlight ring (hovered vertex + its immediate neighbors)
+        if (hoverNode !== null && (i === hoverNode || ((hoverNbrs >>> i) & 1))) {
+          ctx.save();
+          ctx.beginPath();
+          const rr = (i === hoverNode) ? 18 : 15;
+          ctx.arc(p.x, p.y, rr, 0, Math.PI * 2);
+          ctx.strokeStyle = (i === hoverNode) ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.30)';
+          ctx.lineWidth = (i === hoverNode) ? 4 : 3;
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        if (els.labels.checked) {
+          ctx.save();
+          ctx.font = '12px ui-sans-serif, system-ui';
+          ctx.fillStyle = 'rgba(0,0,0,0.75)';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(String(i), p.x, p.y);
+          ctx.restore();
+        }
+      }
+
+      // Done drawing graph under view transform
+      ctx.restore();
+
+      // Status
+      updateStatus();
+
+      // Auto-play
+      maybeAutoCop();
+      maybeAutoRobber();
+    }
+
+    function trimmedMoveRoundsForDisplay(rounds) {
+      let out = (rounds && rounds.length) ? rounds.slice() : [];
+      while (out.length && out[out.length - 1].cop.length === 0 && !out[out.length - 1].robber) {
+        out.pop();
+      }
+      return out;
+    }
+
+    function updateMoveList() {
+      if (!els.moves) return;
+      const rounds = trimmedMoveRoundsForDisplay(state.moveRounds);
+      if (!rounds.length) {
+        els.moves.textContent = 'No moves yet.';
+        return;
+      }
+
+      function fmtEdge(e) { return `(${e.u},${e.v})`; }
+
+      const lines = [];
+      for (let i = 0; i < rounds.length; i++) {
+        const r = rounds[i];
+        const copStr = (r.cop && r.cop.length) ? r.cop.map(fmtEdge).join(';') : '—';
+        const robStr = r.robber ? fmtEdge(r.robber) : '—';
+        lines.push(
+          `<div><span class="num">${i + 1}.</span> <span class="cop">C:</span> ${copStr} &nbsp;&nbsp; <span class="robber">R:</span> ${robStr}</div>`
+        );
+      }
+      const stickToBottom = (els.moves.scrollTop + els.moves.clientHeight) >= (els.moves.scrollHeight - 24);
+      els.moves.innerHTML = lines.join('');
+      // keep scrolled to bottom unless user scrolled up
+      if (stickToBottom) els.moves.scrollTop = els.moves.scrollHeight;
+    }
+
+    // --- Position import/export ----------------------------------------------
+    function exportMovesCompact(rounds) {
+      const rs = trimmedMoveRoundsForDisplay(rounds);
+      // round := copEdges~robEdge
+      // edges: u-v comma-separated. rounds separated by '.'
+      function fmtEdgeDash(e) { return `${e.u}-${e.v}`; }
+      return rs.map(r => {
+        const cop = (r.cop && r.cop.length) ? r.cop.map(fmtEdgeDash).join(',') : '';
+        const rob = r.robber ? fmtEdgeDash(r.robber) : '';
+        return `${cop}~${rob}`;
+      }).join('.');
+    }
+
+    function exportPositionText(state) {
+      const rounds = trimmedMoveRoundsForDisplay(state.moveRounds);
+      const t = (state.turn === COP) ? 'C' : 'R';
+      const header = `k=${state.k} n=${state.n} turn=${t} copMovesLeft=${state.copMovesLeft}`;
+      const lines = [header];
+      function fmtEdge(e) { return `(${e.u},${e.v})`; }
+      for (let i = 0; i < rounds.length; i++) {
+        const r = rounds[i];
+        const copStr = (r.cop && r.cop.length) ? r.cop.map(fmtEdge).join(';') : '—';
+        const robStr = r.robber ? fmtEdge(r.robber) : '—';
+        lines.push(`${i + 1}. C: ${copStr}  R: ${robStr}`);
+      }
+      return lines.join('\n');
+    }
+
+    function parseParams(s) {
+      const out = {};
+      const str = (s || '').replace(/^\?/, '').replace(/^#/, '').trim();
+      if (!str) return out;
+      for (const part of str.split('&')) {
+        if (!part) continue;
+        const i = part.indexOf('=');
+        if (i < 0) { out[decodeURIComponent(part)] = ''; continue; }
+        const k = decodeURIComponent(part.slice(0, i));
+        const v = decodeURIComponent(part.slice(i + 1));
+        out[k] = v;
+      }
+      return out;
+    }
+
+    function parseMovesCompact(m) {
+      const rounds = [];
+      const s = (m || '').trim();
+      if (!s) return rounds;
+      const roundStrs = s.split('.');
+      for (const rs of roundStrs) {
+        if (rs === '') continue;
+        const [copPart, robPart] = rs.split('~');
+        const cop = [];
+        if (copPart) {
+          for (const tok of copPart.split(',')) {
+            if (!tok) continue;
+            const mm = tok.match(/^(\d+)-(\d+)$/);
+            if (!mm) throw new Error(`Bad edge: ${tok}`);
+            let u = Number(mm[1]), v = Number(mm[2]);
+            if (u > v) { const t = u; u = v; v = t; }
+            cop.push({ u, v });
+          }
+        }
+        let robber = null;
+        if (robPart) {
+          const mm = robPart.match(/^(\d+)-(\d+)$/);
+          if (!mm) throw new Error(`Bad robber edge: ${robPart}`);
+          let u = Number(mm[1]), v = Number(mm[2]);
+          if (u > v) { const t = u; u = v; v = t; }
+          robber = { u, v };
+        }
+        rounds.push({ cop, robber });
+      }
+      return rounds;
+    }
+
+    function parseRoundsFromPrettyText(text) {
+      const lines = String(text || '').split(/\r?\n/);
+      const rounds = [];
+      for (const line of lines) {
+        if (line.indexOf('C:') < 0 || line.indexOf('R:') < 0) continue;
+        const iC = line.indexOf('C:');
+        const iR = line.indexOf('R:');
+        if (iR <= iC) continue;
+        const copPart = line.slice(iC + 2, iR);
+        const robPart = line.slice(iR + 2);
+
+        const cop = [];
+        const re = /\((\d+)\s*,\s*(\d+)\)/g;
+        let m;
+        while ((m = re.exec(copPart)) !== null) {
+          let u = Number(m[1]), v = Number(m[2]);
+          if (u > v) { const t = u; u = v; v = t; }
+          cop.push({ u, v });
+        }
+
+        let robber = null;
+        const rr = robPart.match(/\((\d+)\s*,\s*(\d+)\)/);
+        if (rr) {
+          let u = Number(rr[1]), v = Number(rr[2]);
+          if (u > v) { const t = u; u = v; v = t; }
+          robber = { u, v };
+        }
+
+        rounds.push({ cop, robber });
+      }
+      return rounds;
+    }
+
+    function parsePositionTextOrUrl(text) {
+      const raw = String(text || '').trim();
+      if (!raw) throw new Error('Empty input');
+
+      // If it's a URL (or URL fragment), try parsing params from #... or ?...
+      const hashIdx = raw.indexOf('#');
+      const qIdx = raw.indexOf('?');
+      let paramStr = null;
+      if (hashIdx >= 0) paramStr = raw.slice(hashIdx + 1);
+      else if (qIdx >= 0) paramStr = raw.slice(qIdx + 1);
+      else if (raw.includes('&') && raw.includes('=')) paramStr = raw.replace(/^#/, '').replace(/^\?/, '');
+
+      if (paramStr !== null) {
+        const p = parseParams(paramStr);
+        const k = Number(p.k);
+        const n = Number(p.n);
+        const t = (String(p.t || p.turn || '')).toUpperCase();
+        const l = Number(p.l || p.copMovesLeft);
+        const m = p.m || '';
+        if (!Number.isFinite(k) || !Number.isFinite(n)) throw new Error('URL params must include k and n');
+        const turn = (t === 'R' || t === 'ROBBER') ? ROBBER : COP;
+        const rounds = m ? parseMovesCompact(m) : [];
+        return { k, n, turn, copMovesLeft: Number.isFinite(l) ? l : null, rounds };
+      }
+
+      // Pretty text header line
+      const kMatch = raw.match(/\bk\s*=\s*(\d+)/i);
+      const nMatch = raw.match(/\bn\s*=\s*(\d+)/i);
+      const tMatch = raw.match(/\bturn\s*=\s*([CR]|COP|ROBBER)\b/i);
+      const lMatch = raw.match(/\bcopMovesLeft\s*=\s*(\d+)/i);
+
+      const k = kMatch ? Number(kMatch[1]) : Math.max(2, Math.min(16, Number(els.k.value) || 8));
+      const n = nMatch ? Number(nMatch[1]) : Math.max(1, Math.min(8, Number(els.n.value) || 2));
+      const t = tMatch ? String(tMatch[1]).toUpperCase() : null;
+      const turn = (t === 'R' || t === 'ROBBER') ? ROBBER : COP;
+      const copMovesLeft = lMatch ? Number(lMatch[1]) : null;
+
+      const rounds = parseRoundsFromPrettyText(raw);
+      if (!rounds.length && raw.includes('~') && raw.includes('-')) {
+        // Allow pasting just the compact moves string.
+        return { k, n, turn, copMovesLeft, rounds: parseMovesCompact(raw) };
+      }
+      return { k, n, turn, copMovesLeft, rounds };
+    }
+
+    function applyMoveNoUndo(state, u, v) {
+      if (state.gameOver) return { ok: false, reason: 'game over' };
+      if (!isLegal(state, u, v)) return { ok: false, reason: 'illegal edge' };
+      const key = edgeKey(u, v);
+
+      if (state.turn === COP) {
+        if (state.copMovesLeft <= 0) return { ok: false, reason: 'no cop moves left' };
+        state.blue.add(key);
+        recordMove(state, COP, u, v);
+        state.copMovesLeft--;
+        recomputeGameOver(state);
+        if (!state.gameOver && state.copMovesLeft === 0) endTurn(state);
+        return { ok: true };
+      } else {
+        state.red.add(key);
+        recordMove(state, ROBBER, u, v);
+        recomputeGameOver(state);
+        if (!state.gameOver) {
+          endTurn(state);
+          if (!state.moveRounds || !state.moveRounds.length) state.moveRounds = [{ cop: [], robber: null }];
+          state.moveRounds.push({ cop: [], robber: null });
+        }
+        return { ok: true };
+      }
+    }
+
+    function loadPositionFromParsed(parsed) {
+      const k = Math.max(2, Math.min(16, parsed.k | 0));
+      const n = Math.max(1, Math.min(8, parsed.n | 0));
+      let st = makeState(k, n);
+
+      // Replay rounds
+      for (const r of (parsed.rounds || [])) {
+        if (st.gameOver) break;
+        const copEdges = (r && r.cop) ? r.cop : [];
+        for (const e of copEdges) {
+          if (st.gameOver) break;
+          if (st.turn !== COP) throw new Error('Expected COP turn while replaying cop edges');
+          const ok = applyMoveNoUndo(st, e.u, e.v);
+          if (!ok.ok) throw new Error(`Illegal cop move (${e.u},${e.v}): ${ok.reason}`);
+        }
+
+        if (r && r.robber) {
+          if (st.gameOver) break;
+          if (st.turn === COP) endTurn(st); // cop may have ended early
+          if (st.turn !== ROBBER) throw new Error('Expected ROBBER turn while replaying robber edge');
+          const ok = applyMoveNoUndo(st, r.robber.u, r.robber.v);
+          if (!ok.ok) throw new Error(`Illegal robber move (${r.robber.u},${r.robber.v}): ${ok.reason}`);
+        }
+      }
+
+      // Restore current turn/movesLeft if specified.
+      if (parsed && (parsed.turn === COP || parsed.turn === ROBBER)) {
+        st.turn = parsed.turn;
+      }
+      if (parsed && Number.isFinite(parsed.copMovesLeft) && parsed.copMovesLeft !== null) {
+        st.copMovesLeft = Math.max(0, Math.min(st.n, parsed.copMovesLeft | 0));
+      }
+      recomputeGameOver(st);
+
+      // Swap into UI
+      state = st;
+      els.k.value = String(state.k);
+      els.n.value = String(state.n);
+      resetView();
+      hoverEdge = null;
+      hoverNode = null;
+      layout = null;
+      forceNeedsRelax = true;
+      draw();
+    }
+
+    function positionHashForState(state) {
+      const t = (state.turn === COP) ? 'C' : 'R';
+      const m = exportMovesCompact(state.moveRounds);
+      return `k=${state.k}&n=${state.n}&t=${t}&l=${state.copMovesLeft}&m=${m}`;
+    }
+
+    async function copyTextToClipboard(text) {
+      const s = String(text);
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(s);
+          return true;
+        }
+      } catch (e) {
+        // fall back
+      }
+
+      // Fallback: create a temporary textarea
+      const ta = document.createElement('textarea');
+      ta.value = s;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      ta.style.top = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch (e) {
+        document.body.removeChild(ta);
+        return false;
+      }
+    }
+
+    function maybeLoadPositionFromUrl() {
+      const h = (location.hash || '').replace(/^#/, '');
+      const q = (location.search || '').replace(/^\?/, '');
+      const source = h.includes('k=') ? h : (q.includes('k=') ? q : '');
+      if (!source) return false;
+      const p = parseParams(source);
+      if (!p.k || !p.n) return false;
+      const parsed = {
+        k: Number(p.k),
+        n: Number(p.n),
+        turn: ((String(p.t || '').toUpperCase() === 'R') ? ROBBER : COP),
+        copMovesLeft: Number(p.l),
+        rounds: p.m ? parseMovesCompact(p.m) : [],
+      };
+      loadPositionFromParsed(parsed);
+      return true;
+    }
+
+    function updateStatus() {
+      const totalEdges = state.k * (state.k - 1) / 2;
+      const used = state.blue.size + state.red.size;
+      const remaining = totalEdges - used;
+
+      const turnStr = state.turn === COP
+        ? `<span class="cop">Cop</span> (blocks up to ${state.n}/turn)`
+        : `<span class="robber">Robber</span> (claims 1/turn)`;
+
+      let extra = '';
+      if (state.turn === COP) extra = ` — blocks left this turn: <strong>${state.copMovesLeft}</strong>`;
+
+      let outcome = '';
+      if (state.gameOver) {
+        outcome = state.winner === COP
+          ? `<div style="margin-top:8px; color: var(--win)"><strong>Cop wins.</strong> (0 and 1 are disconnected in the remaining unblocked graph.)</div>`
+          : `<div style="margin-top:8px; color: var(--lose)"><strong>Robber wins.</strong> (Red connected 0 ↔ 1.)</div>`;
+      }
+
+      els.status.innerHTML = `
+        <div>Turn: <strong>${turnStr}</strong>${extra}</div>
+        <div style="margin-top:6px">Edges — blue: <strong>${state.blue.size}</strong>, red: <strong>${state.red.size}</strong>, remaining: <strong>${remaining}</strong> / ${totalEdges}</div>
+        ${outcome}
+      `;
+
+      els.smallInfo.textContent = state.gameOver
+        ? `Game over: ${state.winner.toUpperCase()} wins`
+        : `Click an unclaimed edge (${state.turn.toUpperCase()} to move)`;
+
+      if (els.copLegend) {
+        const v = (els.copView && els.copView.value) ? els.copView.value : 'blue';
+        if (v === 'delete') els.copLegend.textContent = 'Cop (deletions — hidden in this view)';
+        else if (v === 'robber') els.copLegend.textContent = 'Cop (deletions — hidden; robber-attraction layout)';
+        else els.copLegend.textContent = 'Cop (blocked edge)';
+      }
+
+      els.endTurn.disabled = (state.turn !== COP) || state.gameOver;
+      els.undo.disabled = (state.undoStack.length === 0);
+
+      updateMoveList();
+    }
+
+    function computeRedComponents(state) {
+      const k = state.k;
+      const full = (1 << k) - 1;
+      const adj = redAdjMask(state);
+
+      const compOf = new Array(k).fill(-1);
+      const comps = [];
+
+      let seen = 0;
+      for (let s = 0; s < k; s++) {
+        if ((seen >>> s) & 1) continue;
+        let visited = 0;
+        let frontier = (1 << s);
+        visited |= frontier;
+        while (frontier) {
+          let next = 0;
+          let f = frontier;
+          while (f) {
+            const lsb = f & -f;
+            const u = 31 - Math.clz32(lsb);
+            next |= adj[u];
+            f ^= lsb;
+          }
+          next &= ~visited;
+          visited |= next;
+          frontier = next;
+        }
+
+        const verts = [];
+        let m = visited;
+        while (m) {
+          const lsb = m & -m;
+          const u = 31 - Math.clz32(lsb);
+          m ^= lsb;
+          verts.push(u);
+        }
+        verts.sort((a, b) => a - b);
+        const ci = comps.length;
+        for (const v of verts) compOf[v] = ci;
+        comps.push(verts);
+        seen |= visited;
+        if (seen === full) break;
+      }
+
+      return { comps, compOf };
+    }
+
+    function minCutOnRedComponents(state, comps, compOf) {
+      // Returns boolean array inS over components: inS[i]=true means component i is on 0's side.
+      const m = comps.length;
+      const s = compOf[0];
+      const t = compOf[1];
+      const inS = new Array(m).fill(false);
+      if (s < 0 || t < 0) return inS;
+      if (s === t) {
+        inS[s] = true;
+        return inS;
+      }
+
+      const sizes = comps.map(c => c.length);
+      const blocked = Array.from({ length: m }, () => new Array(m).fill(0));
+      for (const key of state.blue) {
+        const [u, v] = parseEdgeKey(key);
+        const cu = compOf[u], cv = compOf[v];
+        if (cu >= 0 && cv >= 0 && cu !== cv) {
+          blocked[cu][cv]++;
+          blocked[cv][cu]++;
+        }
+      }
+
+      const cap = Array.from({ length: m }, () => new Array(m).fill(0));
+      for (let i = 0; i < m; i++) {
+        for (let j = i + 1; j < m; j++) {
+          const c = Math.max(0, sizes[i] * sizes[j] - blocked[i][j]);
+          cap[i][j] = c;
+          cap[j][i] = c;
+        }
+      }
+
+      // Edmonds-Karp maxflow
+      const res = cap.map(row => row.slice());
+      while (true) {
+        const parent = new Array(m).fill(-1);
+        const minCap = new Array(m).fill(0);
+        const q = [];
+        parent[s] = -2;
+        minCap[s] = Infinity;
+        q.push(s);
+
+        while (q.length && parent[t] === -1) {
+          const u = q.shift();
+          for (let v = 0; v < m; v++) {
+            if (parent[v] !== -1) continue;
+            const c = res[u][v];
+            if (c <= 0) continue;
+            parent[v] = u;
+            minCap[v] = Math.min(minCap[u], c);
+            if (v === t) break;
+            q.push(v);
+          }
+        }
+
+        if (parent[t] === -1) break;
+
+        const add = minCap[t];
+        let v = t;
+        while (v !== s) {
+          const u = parent[v];
+          res[u][v] -= add;
+          res[v][u] += add;
+          v = u;
+        }
+      }
+
+      // reachable from s in residual graph
+      const vis = new Array(m).fill(false);
+      const q = [s];
+      vis[s] = true;
+      while (q.length) {
+        const u = q.shift();
+        for (let v = 0; v < m; v++) {
+          if (vis[v]) continue;
+          if (res[u][v] > 0) {
+            vis[v] = true;
+            q.push(v);
+          }
+        }
+      }
+      for (let i = 0; i < m; i++) inS[i] = vis[i];
+      return inS;
+    }
+
+    // --- Cop AI (search against known robber policy) --------------------------
+    function cloneStateForSim(state) {
+      return {
+        k: state.k,
+        n: state.n,
+        turn: state.turn,
+        copMovesLeft: state.copMovesLeft,
+        blue: new Set(state.blue),
+        red: new Set(state.red),
+        undoStack: [],
+        gameOver: state.gameOver,
+        winner: state.winner,
+      };
+    }
+
+    function applyMoveSim(state, u, v) {
+      if (state.gameOver) return { ok: false, reason: 'game over' };
+      if (!isLegal(state, u, v)) return { ok: false, reason: 'illegal edge' };
+      const key = edgeKey(u, v);
+
+      if (state.turn === COP) {
+        if (state.copMovesLeft <= 0) return { ok: false, reason: 'no cop moves left' };
+        state.blue.add(key);
+        state.copMovesLeft--;
+        recomputeGameOver(state);
+        if (!state.gameOver && state.copMovesLeft === 0) endTurn(state);
+        return { ok: true };
+      } else {
+        state.red.add(key);
+        recomputeGameOver(state);
+        if (!state.gameOver) endTurn(state);
+        return { ok: true };
+      }
+    }
+
+    function robberPolicyMove(state) {
+      // Legacy helper (kept for reference). Current cop search uses adversarial candidate replies instead.
+      return robberMajorityMinorityMove(state) || robberPaperMove(state);
+    }
+
+    function minCutWeighted01(state) {
+      // Min s-t cut in the remaining graph where:
+      // - blue edges have capacity 0 (already deleted)
+      // - neutral edges have capacity 1 (cop can delete)
+      // - red edges have capacity INF (cop cannot delete)
+      // Returns {cut, sideMask} where sideMask is the vertices reachable from 0 in residual.
+      const k = state.k;
+      const INF = 1000000;
+
+      const cap = Array.from({ length: k }, () => new Array(k).fill(0));
+      for (let u = 0; u < k; u++) {
+        for (let v = u + 1; v < k; v++) {
+          const key = edgeKey(u, v);
+          let c = 1;
+          if (state.blue.has(key)) c = 0;
+          else if (state.red.has(key)) c = INF;
+          cap[u][v] = c;
+          cap[v][u] = c;
+        }
+      }
+
+      const s = 0, t = 1;
+      const res = cap.map(row => row.slice());
+      let flow = 0;
+
+      while (true) {
+        const parent = new Array(k).fill(-1);
+        const minCap = new Array(k).fill(0);
+        const q = [];
+        parent[s] = -2;
+        minCap[s] = INF;
+        q.push(s);
+
+        while (q.length && parent[t] === -1) {
+          const u = q.shift();
+          for (let v = 0; v < k; v++) {
+            if (parent[v] !== -1) continue;
+            const c = res[u][v];
+            if (c <= 0) continue;
+            parent[v] = u;
+            minCap[v] = Math.min(minCap[u], c);
+            if (v === t) break;
+            q.push(v);
+          }
+        }
+
+        if (parent[t] === -1) break;
+        const add = minCap[t];
+        flow += add;
+        let v = t;
+        while (v !== s) {
+          const u = parent[v];
+          res[u][v] -= add;
+          res[v][u] += add;
+          v = u;
+        }
+      }
+
+      // reachable from s in residual
+      let sideMask = 0;
+      const vis = new Array(k).fill(false);
+      const q = [s];
+      vis[s] = true;
+      while (q.length) {
+        const u = q.shift();
+        sideMask |= (1 << u);
+        for (let v = 0; v < k; v++) {
+          if (vis[v]) continue;
+          if (res[u][v] > 0) {
+            vis[v] = true;
+            q.push(v);
+          }
+        }
+      }
+
+      return { cut: flow, sideMask };
+    }
+
+    function countLegalEdgesBetweenLists(state, A, B) {
+      let cnt = 0;
+      for (const u of A) {
+        for (const v of B) {
+          if (isLegal(state, u, v)) cnt++;
+        }
+      }
+      return cnt;
+    }
+
+    function evalForCop(state) {
+      if (state.gameOver) return (state.winner === COP) ? 1e12 : -1e12;
+      const { cut } = minCutWeighted01(state);
+
+      const { comps, compOf } = computeRedComponents(state);
+      if (compOf[0] === compOf[1]) {
+        // should be gameOver via robberHasWon, but keep safe
+        return -1e12;
+      }
+
+      // Immediate threat: legal edges between the red components containing 0 and 1.
+      const C0 = comps[compOf[0]];
+      const C1 = comps[compOf[1]];
+      const threat = countLegalEdgesBetweenLists(state, C0, C1);
+
+      // "Pivot" / 2-turn threat: an outside component D that can connect to one side while
+      // having >n edges into the other side.
+      let pivotMax = 0;
+      for (let d = 0; d < comps.length; d++) {
+        if (d === compOf[0] || d === compOf[1]) continue;
+        const D = comps[d];
+        if (!D.length) continue;
+        const a0 = countLegalEdgesBetweenLists(state, D, C0);
+        const a1 = countLegalEdgesBetweenLists(state, D, C1);
+        if (a0 > 0 && a1 > state.n) pivotMax = Math.max(pivotMax, a1 - state.n);
+        if (a1 > 0 && a0 > state.n) pivotMax = Math.max(pivotMax, a0 - state.n);
+      }
+
+      // If it's robber to move and there is any C0-C1 edge left, robber wins immediately.
+      if (state.turn === ROBBER && threat > 0) return -1e11;
+
+      // Smaller cut is better for cop; threats should dominate.
+      return -cut - 0.35 * threat - 3.0 * pivotMax;
+    }
+
+    function evalForRobber(state) {
+      if (state.gameOver) return (state.winner === ROBBER) ? 1e12 : -1e12;
+      const { cut } = minCutWeighted01(state);
+
+      const { comps, compOf } = computeRedComponents(state);
+      let threat = 0;
+      if (compOf[0] !== compOf[1]) threat = countLegalEdgesBetweenLists(state, comps[compOf[0]], comps[compOf[1]]);
+
+      // Larger cut and larger immediate threat are better for robber.
+      return cut + 0.05 * threat;
+    }
+
+    // --- Perfect solver (very small k) ---------------------------------------
+    // NOTE: running full minimax in the UI thread can freeze the tab if k is too large.
+    // We keep this for k<=6 only (see maybeAutoCop).
+    let perfectCtx = null; // {k,n, edges:[{u,v}], edgeIndex:Map<key,idx>, E:BigInt, memo:Map<BigInt,number>}
+
+    function ensurePerfectCtx(k, n) {
+      if (perfectCtx && perfectCtx.k === k && perfectCtx.n === n) return perfectCtx;
+      const edges = [];
+      const edgeIndex = new Map();
+      for (let u = 0; u < k; u++) {
+        for (let v = u + 1; v < k; v++) {
+          const idx = edges.length;
+          edges.push({ u, v });
+          edgeIndex.set(edgeKey(u, v), idx);
+        }
+      }
+      perfectCtx = { k, n, edges, edgeIndex, E: BigInt(edges.length), memo: new Map() };
+      return perfectCtx;
+    }
+
+    function masksFromState(state, ctx) {
+      let blue = 0n;
+      let red = 0n;
+      for (const key of state.blue) {
+        const idx = ctx.edgeIndex.get(key);
+        if (idx !== undefined) blue |= (1n << BigInt(idx));
+      }
+      for (const key of state.red) {
+        const idx = ctx.edgeIndex.get(key);
+        if (idx !== undefined) red |= (1n << BigInt(idx));
+      }
+      return { blue, red };
+    }
+
+    function adjFromEdgeMask(mask, ctx) {
+      const k = ctx.k;
+      const adj = new Array(k).fill(0);
+      for (let i = 0; i < ctx.edges.length; i++) {
+        if (((mask >> BigInt(i)) & 1n) === 0n) continue;
+        const { u, v } = ctx.edges[i];
+        adj[u] |= (1 << v);
+        adj[v] |= (1 << u);
+      }
+      return adj;
+    }
+
+    function availableAdjFromBlueMask(blueMask, ctx) {
+      const k = ctx.k;
+      const fullMask = (1 << k) - 1;
+      const adj = new Array(k).fill(0);
+      for (let u = 0; u < k; u++) adj[u] = (fullMask ^ (1 << u));
+      for (let i = 0; i < ctx.edges.length; i++) {
+        if (((blueMask >> BigInt(i)) & 1n) === 0n) continue;
+        const { u, v } = ctx.edges[i];
+        adj[u] &= ~(1 << v);
+        adj[v] &= ~(1 << u);
+      }
+      return adj;
+    }
+
+    function perfectOutcome(turn, copMovesLeft, blueMask, redMask, ctx) {
+      // Returns  1 if cop can force a win, -1 if robber can force a win from this exact state.
+      // Uses exact memoization (no alpha-beta) to keep caching sound.
+      const key = (((blueMask << ctx.E) | redMask) << 6n) |
+        BigInt(((turn === COP) ? 1 : 0) * 16 + (copMovesLeft & 15));
+
+      const memoHit = ctx.memo.get(key);
+      if (memoHit !== undefined) return memoHit;
+
+      // Terminal checks (match recomputeGameOver order)
+      const adjRed = adjFromEdgeMask(redMask, ctx);
+      if (connected(adjRed, ctx.k, 0, 1)) {
+        ctx.memo.set(key, -1);
+        return -1;
+      }
+      const adjAvail = availableAdjFromBlueMask(blueMask, ctx);
+      if (!connected(adjAvail, ctx.k, 0, 1)) {
+        ctx.memo.set(key, 1);
+        return 1;
+      }
+
+      const occupied = blueMask | redMask;
+
+      if (turn === COP) {
+        // Cop wants any line that leads to a forced win.
+        // Option 0: end turn early.
+        if (perfectOutcome(ROBBER, ctx.n, blueMask, redMask, ctx) === 1) {
+          ctx.memo.set(key, 1);
+          return 1;
+        }
+
+        if (copMovesLeft > 0) {
+          for (let i = 0; i < ctx.edges.length; i++) {
+            const bit = 1n << BigInt(i);
+            if (occupied & bit) continue;
+            const newBlue = blueMask | bit;
+            const newMoves = copMovesLeft - 1;
+            const nextTurn = (newMoves === 0) ? ROBBER : COP;
+            const nextMoves = (newMoves === 0) ? ctx.n : newMoves;
+            if (perfectOutcome(nextTurn, nextMoves, newBlue, redMask, ctx) === 1) {
+              ctx.memo.set(key, 1);
+              return 1;
+            }
+          }
+        }
+
+        ctx.memo.set(key, -1);
+        return -1;
+      } else {
+        // Robber: if it has any winning reply, cop loses.
+        for (let i = 0; i < ctx.edges.length; i++) {
+          const bit = 1n << BigInt(i);
+          if (occupied & bit) continue;
+          if (perfectOutcome(COP, ctx.n, blueMask, redMask | bit, ctx) === -1) {
+            ctx.memo.set(key, -1);
+            return -1;
+          }
+        }
+        ctx.memo.set(key, 1);
+        return 1;
+      }
+    }
+
+    function copPerfectPick(state) {
+      // Returns {u,v} to play next, or null to end the turn.
+      const ctx = ensurePerfectCtx(state.k, state.n);
+      const { blue, red } = masksFromState(state, ctx);
+      const occupied = blue | red;
+
+      // If ending the turn is already winning, do it.
+      let bestVal = perfectOutcome(ROBBER, ctx.n, blue, red, ctx);
+      let bestMove = null;
+      if (bestVal === 1) return null;
+
+      if (state.copMovesLeft <= 0) return null;
+
+      for (let i = 0; i < ctx.edges.length; i++) {
+        const bit = 1n << BigInt(i);
+        if (occupied & bit) continue;
+        const { u, v } = ctx.edges[i];
+
+        // Quick legality check in UI terms.
+        if (!isLegal(state, u, v)) continue;
+
+        const newBlue = blue | bit;
+        const newMoves = state.copMovesLeft - 1;
+        const nextTurn = (newMoves === 0) ? ROBBER : COP;
+        const nextMoves = (newMoves === 0) ? ctx.n : newMoves;
+        const val = perfectOutcome(nextTurn, nextMoves, newBlue, red, ctx);
+        if (val > bestVal) {
+          bestVal = val;
+          bestMove = { u, v };
+          if (bestVal === 1) break;
+        }
+      }
+
+      return bestMove;
+    }
+
+    function copBestMoveSetOnePly(state, budgetMs = 35, maxCandidates = 16) {
+      // Best cop deletion set for the *current* cop turn, without simulating robber reply.
+      const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      const moves = Math.max(0, state.copMovesLeft | 0);
+      if (moves <= 0) return [];
+
+      const cand = copCandidateEdges(state, maxCandidates);
+      const m = Math.min(moves, cand.length);
+      if (m <= 0) return [];
+
+      let bestSet = [];
+      let bestScore = -Infinity;
+
+      function timeUp() {
+        const t = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        return (t - t0) > budgetMs;
+      }
+
+      function scoreSet(indices) {
+        const sim = cloneStateForSim(state);
+        for (const idx of indices) {
+          const e = cand[idx];
+          applyMoveSim(sim, e.u, e.v);
+          if (sim.gameOver) return evalForCop(sim);
+        }
+        // End cop turn so the state is comparable.
+        if (!sim.gameOver && sim.turn === COP) endTurn(sim);
+        return evalForCop(sim);
+      }
+
+      if (m === 1) {
+        for (let i = 0; i < cand.length; i++) {
+          if (timeUp()) break;
+          const sc = scoreSet([i]);
+          if (sc > bestScore) { bestScore = sc; bestSet = [cand[i]]; }
+        }
+      } else if (m === 2) {
+        for (let i = 0; i < cand.length; i++) {
+          for (let j = i + 1; j < cand.length; j++) {
+            if (timeUp()) break;
+            const sc = scoreSet([i, j]);
+            if (sc > bestScore) { bestScore = sc; bestSet = [cand[i], cand[j]]; }
+          }
+          if (timeUp()) break;
+        }
+      } else {
+        for (let i = 0; i < cand.length; i++) {
+          for (let j = i + 1; j < cand.length; j++) {
+            for (let l = j + 1; l < cand.length; l++) {
+              if (timeUp()) break;
+              const sc = scoreSet([i, j, l]);
+              if (sc > bestScore) { bestScore = sc; bestSet = [cand[i], cand[j], cand[l]]; }
+            }
+            if (timeUp()) break;
+          }
+          if (timeUp()) break;
+        }
+      }
+
+      return bestSet;
+    }
+
+    function copCandidateEdgesScored(state, maxEdges) {
+      const k = state.k;
+      const candidates = [];
+      const seen = new Set();
+
+      const { comps, compOf } = computeRedComponents(state);
+      const c0 = compOf[0];
+      const c1 = compOf[1];
+      const C0 = (c0 >= 0) ? comps[c0] : [0];
+      const C1 = (c1 >= 0) ? comps[c1] : [1];
+
+      function add(u, v, score) {
+        if (u === v) return;
+        if (u > v) { const t = u; u = v; v = t; }
+        if (!isLegal(state, u, v)) return;
+        const key = edgeKey(u, v);
+        if (seen.has(key)) return;
+        seen.add(key);
+        candidates.push({ u, v, score });
+      }
+
+      // Emergency edges between the two target red components.
+      if (c0 >= 0 && c1 >= 0 && c0 !== c1) {
+        for (const u of C0) for (const v of C1) add(u, v, 10000);
+      }
+
+      // Pivot threat defense: if an outside component D can attach to one side and has >n
+      // edges into the other side, prioritize deleting edges from D to the "other" side.
+      if (c0 >= 0 && c1 >= 0 && c0 !== c1) {
+        for (let d = 0; d < comps.length; d++) {
+          if (d === c0 || d === c1) continue;
+          const D = comps[d];
+          if (!D.length) continue;
+          const a0 = countLegalEdgesBetweenLists(state, D, C0);
+          const a1 = countLegalEdgesBetweenLists(state, D, C1);
+          if (a0 > 0 && a1 > state.n) {
+            const urg = 2200 + 40 * (a1 - state.n);
+            for (const u of D) for (const v of C1) add(u, v, urg);
+          }
+          if (a1 > 0 && a0 > state.n) {
+            const urg = 2200 + 40 * (a0 - state.n);
+            for (const u of D) for (const v of C0) add(u, v, urg);
+          }
+        }
+      }
+
+      // Edges across the current weighted min-cut partition.
+      const { sideMask } = minCutWeighted01(state);
+      for (let u = 0; u < k; u++) {
+        for (let v = u + 1; v < k; v++) {
+          const inU = (sideMask >>> u) & 1;
+          const inV = (sideMask >>> v) & 1;
+          if (inU !== inV) add(u, v, 500);
+        }
+      }
+
+      // Edges incident to C0 / C1.
+      for (const u of C0) for (let v = 0; v < k; v++) if (v !== u) add(u, v, 100);
+      for (const u of C1) for (let v = 0; v < k; v++) if (v !== u) add(u, v, 100);
+
+      candidates.sort((a, b) => b.score - a.score);
+      return candidates.slice(0, Math.max(1, maxEdges));
+    }
+
+    function copCandidateEdges(state, maxEdges) {
+      return copCandidateEdgesScored(state, maxEdges).map(e => ({ u: e.u, v: e.v }));
+    }
+
+    function robberCandidateMovesBasic(state, maxCandidates = 24) {
+      // Generate a small list of plausible robber moves (no lookahead).
+      const k = state.k;
+      const moves = [];
+      const seen = new Set();
+
+      function add(u, v, score) {
+        if (u === v) return;
+        if (u > v) { const t = u; u = v; v = t; }
+        if (!isLegal(state, u, v)) return;
+        const key = edgeKey(u, v);
+        if (seen.has(key)) return;
+        seen.add(key);
+        moves.push({ u, v, score });
+      }
+
+      const { comps, compOf } = computeRedComponents(state);
+      const c0 = compOf[0];
+      const c1 = compOf[1];
+      if (c0 < 0 || c1 < 0 || c0 === c1) return [];
+      const C0 = comps[c0];
+      const C1 = comps[c1];
+
+      // Immediate win: any edge between C0 and C1.
+      for (const u of C0) {
+        for (const v of C1) {
+          if (isLegal(state, u, v)) return [{ u, v, score: 1e9 }];
+        }
+      }
+
+      // Seed with your heuristics.
+      const mm = robberMajorityMinorityMove(state);
+      if (mm) add(mm.u, mm.v, 10000);
+      const pp = robberPaperMove(state);
+      if (pp) add(pp.u, pp.v, 9000);
+
+      function countAndPick(A, B) {
+        let cnt = 0;
+        let cand = null;
+        for (const u of A) {
+          for (const v of B) {
+            if (!isLegal(state, u, v)) continue;
+            cnt++;
+            if (!cand) cand = { u, v };
+          }
+        }
+        return { cnt, cand };
+      }
+
+      // Component merges: for each outside component D, consider merging it into either side.
+      for (let d = 0; d < comps.length; d++) {
+        if (d === c0 || d === c1) continue;
+        const D = comps[d];
+        if (!D.length) continue;
+        const to0 = countAndPick(D, C0);
+        const to1 = countAndPick(D, C1);
+        if (to0.cand) add(to0.cand.u, to0.cand.v, 100 + 6 * to1.cnt + 0.2 * D.length);
+        if (to1.cand) add(to1.cand.u, to1.cand.v, 100 + 6 * to0.cnt + 0.2 * D.length);
+      }
+
+      // Fill with a few arbitrary legal edges if needed.
+      if (moves.length < maxCandidates) {
+        for (let u = 0; u < k; u++) {
+          for (let v = u + 1; v < k; v++) {
+            if (moves.length >= maxCandidates) break;
+            if (isLegal(state, u, v)) add(u, v, 1);
+          }
+          if (moves.length >= maxCandidates) break;
+        }
+      }
+
+      moves.sort((a, b) => b.score - a.score);
+      return moves.slice(0, Math.max(1, maxCandidates));
+    }
+
+    function copBestMoveSetMinimax(state, budgetMs = 80, maxCopCandidates = 18, maxRobberCandidates = 24) {
+      // 2-ply adversarial search:
+      // Cop chooses a set of up to copMovesLeft blue deletions.
+      // Robber then plays its best reply among a candidate list.
+      // Cop picks the set maximizing the worst-case evalForCop after the robber reply.
+      const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      const moves = Math.max(0, state.copMovesLeft | 0);
+      if (moves <= 0) return [];
+
+      const cand = copCandidateEdges(state, maxCopCandidates);
+      const m = Math.min(moves, cand.length);
+      if (m <= 0) return [];
+
+      let bestSet = [];
+      let bestScore = -Infinity;
+
+      function timeUp() {
+        const t = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        return (t - t0) > budgetMs;
+      }
+
+      function scoreSet(indices) {
+        const sim = cloneStateForSim(state);
+        for (const idx of indices) {
+          const e = cand[idx];
+          applyMoveSim(sim, e.u, e.v);
+          if (sim.gameOver) return evalForCop(sim);
+        }
+        if (!sim.gameOver && sim.turn === COP) endTurn(sim);
+        if (sim.gameOver) return evalForCop(sim);
+
+        if (sim.turn !== ROBBER) return evalForCop(sim);
+
+        const rCands = robberCandidateMovesBasic(sim, maxRobberCandidates);
+        if (rCands.length === 0) return evalForCop(sim);
+
+        let worst = Infinity;
+        for (const mv of rCands) {
+          const sim2 = cloneStateForSim(sim);
+          applyMoveSim(sim2, mv.u, mv.v);
+          const sc = evalForCop(sim2);
+          if (sc < worst) worst = sc;
+          if (worst <= bestScore) {
+            // alpha cutoff: this cop set can't beat current best
+            break;
+          }
+          if (timeUp()) break;
+        }
+        return worst;
+      }
+
+      if (m === 1) {
+        for (let i = 0; i < cand.length; i++) {
+          if (timeUp()) break;
+          const sc = scoreSet([i]);
+          if (sc > bestScore) { bestScore = sc; bestSet = [cand[i]]; }
+        }
+      } else if (m === 2) {
+        for (let i = 0; i < cand.length; i++) {
+          for (let j = i + 1; j < cand.length; j++) {
+            if (timeUp()) break;
+            const sc = scoreSet([i, j]);
+            if (sc > bestScore) { bestScore = sc; bestSet = [cand[i], cand[j]]; }
+          }
+          if (timeUp()) break;
+        }
+      } else {
+        // m >= 3
+        for (let i = 0; i < cand.length; i++) {
+          for (let j = i + 1; j < cand.length; j++) {
+            for (let l = j + 1; l < cand.length; l++) {
+              if (timeUp()) break;
+              const sc = scoreSet([i, j, l]);
+              if (sc > bestScore) { bestScore = sc; bestSet = [cand[i], cand[j], cand[l]]; }
+            }
+            if (timeUp()) break;
+          }
+          if (timeUp()) break;
+        }
+      }
+
+      return bestSet;
+    }
+
+    // --- Deeper adversarial search (time-bounded, beam + alpha-beta) ----------
+    const AI_CFG_LIGHT = {
+      copBudgetMs: 250,
+      robberBudgetMs: 250,
+      copMaxDepth: 4,
+      robberMaxDepth: 4,
+      copEdgeCandidates: 22,
+      copEdgePool: 12,
+      copSetBeam: 30,
+      robberCandidates: 32,
+      robberBeam: 20,
+      copSetSizeCap: 3,
+      ttMax: 12000,
+    };
+
+    const AI_CFG_DEEP = {
+      // Warning: these are large values; each move can block the UI thread while thinking.
+      copBudgetMs: 5000,
+      robberBudgetMs: 5000,
+      copMaxDepth: 10,
+      robberMaxDepth: 10,
+      copEdgeCandidates: 60,
+      copEdgePool: 20,
+      copSetBeam: 140,
+      robberCandidates: 140,
+      robberBeam: 90,
+      copSetSizeCap: 3,
+      ttMax: 90000,
+    };
+
+    function currentAICfg() {
+      const mode = (els.thinkMode && els.thinkMode.value) ? els.thinkMode.value : 'deep';
+      return (mode === 'light') ? AI_CFG_LIGHT : AI_CFG_DEEP;
+    }
+
+    // --- Transposition table (memoized lines) ---------------------------------
+    // Bounded per-move cache used by minimaxValue() to avoid re-searching the same
+    // position at the same (or lower) remaining depth.
+    let _edgeCtx = null; // cached for current k
+    function ensureEdgeCtx(k) {
+      if (_edgeCtx && _edgeCtx.k === k) return _edgeCtx;
+      const edges = [];
+      const edgeIndex = new Map();
+      for (let u = 0; u < k; u++) {
+        for (let v = u + 1; v < k; v++) {
+          const idx = edges.length;
+          edges.push({ u, v });
+          edgeIndex.set(edgeKey(u, v), idx);
+        }
+      }
+      _edgeCtx = { k, edges, edgeIndex, E: BigInt(edges.length) };
+      return _edgeCtx;
+    }
+
+    function masksForTT(state, ctx) {
+      let blue = 0n;
+      let red = 0n;
+      for (const key of state.blue) {
+        const idx = ctx.edgeIndex.get(key);
+        if (idx !== undefined) blue |= (1n << BigInt(idx));
+      }
+      for (const key of state.red) {
+        const idx = ctx.edgeIndex.get(key);
+        if (idx !== undefined) red |= (1n << BigInt(idx));
+      }
+      return { blue, red };
+    }
+
+    function ttKeyForState(state, ctx) {
+      const { blue, red } = masksForTT(state, ctx);
+      const E = ctx.E;
+      const metaShift = 2n * E;
+      let key = blue | (red << E);
+      key |= BigInt(state.turn === ROBBER ? 1 : 0) << metaShift;
+      key |= BigInt(state.copMovesLeft & 15) << (metaShift + 1n);
+      key |= BigInt(state.n & 15) << (metaShift + 5n);
+      return key;
+    }
+
+    function ttGet(tt, key, depth) {
+      const e = tt.get(key);
+      if (!e) return null;
+      if ((e.depth | 0) < (depth | 0)) return null;
+      // LRU-ish: refresh by reinserting.
+      tt.delete(key);
+      tt.set(key, e);
+      return e;
+    }
+
+    function ttPut(search, key, depth, val, flag, pv = null) {
+      const tt = search.tt;
+      if (!tt) return;
+      tt.set(key, { depth: depth | 0, val, flag: flag | 0, pv });
+      const max = search.ttMax | 0;
+      if (max > 0 && tt.size > max) {
+        // Evict oldest ~20%.
+        const drop = Math.max(1, Math.floor(max * 0.2));
+        let i = 0;
+        for (const k of tt.keys()) {
+          tt.delete(k);
+          if (++i >= drop) break;
+        }
+      }
+    }
+
+    function setSigFromEdges(edges) {
+      if (!edges || edges.length === 0) return '';
+      const ks = [];
+      for (const e of edges) ks.push(edgeKey(e.u, e.v));
+      ks.sort();
+      return ks.join(';');
+    }
+
+    function generateCopMoveSets(state, cfg) {
+      // Generates and orders candidate cop "set moves" (each is an array of edges) for this turn.
+      const size = Math.max(0, Math.min(state.copMovesLeft | 0, cfg.copSetSizeCap | 0));
+      if (size <= 0) return [{ edges: [], score: 0 }];
+
+      const scored = copCandidateEdgesScored(state, cfg.copEdgeCandidates);
+      const pool = scored.slice(0, Math.max(1, Math.min(cfg.copEdgePool, scored.length)));
+      const sets = [];
+
+      // Hard safety: if there are <=size immediate winning edges between the red components of 0 and 1,
+      // include the full-block set explicitly so beam ordering can't miss it.
+      {
+        const { comps, compOf } = computeRedComponents(state);
+        const c0 = compOf[0];
+        const c1 = compOf[1];
+        if (c0 >= 0 && c1 >= 0 && c0 !== c1) {
+          const C0 = comps[c0];
+          const C1 = comps[c1];
+          const must = [];
+          for (const u of C0) {
+            for (const v of C1) {
+              if (isLegal(state, u, v)) must.push({ u: Math.min(u, v), v: Math.max(u, v) });
+            }
+          }
+          if (must.length > 0 && must.length <= size) {
+            sets.push({ edges: must, score: 1e9 });
+          }
+        }
+      }
+
+      if (size === 1) {
+        for (let i = 0; i < pool.length; i++) {
+          const e = pool[i];
+          sets.push({ edges: [{ u: e.u, v: e.v }], score: e.score });
+        }
+      } else if (size === 2) {
+        for (let i = 0; i < pool.length; i++) {
+          for (let j = i + 1; j < pool.length; j++) {
+            const a = pool[i], b = pool[j];
+            sets.push({
+              edges: [{ u: a.u, v: a.v }, { u: b.u, v: b.v }],
+              score: a.score + b.score,
+            });
+          }
+        }
+      } else {
+        // size >= 3
+        for (let i = 0; i < pool.length; i++) {
+          for (let j = i + 1; j < pool.length; j++) {
+            for (let l = j + 1; l < pool.length; l++) {
+              const a = pool[i], b = pool[j], c = pool[l];
+              sets.push({
+                edges: [{ u: a.u, v: a.v }, { u: b.u, v: b.v }, { u: c.u, v: c.v }],
+                score: a.score + b.score + c.score,
+              });
+            }
+          }
+        }
+      }
+
+      // Always include the "end turn now" option as a last resort.
+      sets.push({ edges: [], score: -1 });
+
+      sets.sort((x, y) => y.score - x.score);
+      return sets.slice(0, Math.max(1, cfg.copSetBeam));
+    }
+
+    function generateRobberMoves(state, cfg) {
+      const moves = robberCandidateMovesBasic(state, cfg.robberCandidates);
+      moves.sort((a, b) => b.score - a.score);
+      return moves.slice(0, Math.max(1, cfg.robberBeam));
+    }
+
+    function applyCopSetSim(base, setEdges) {
+      const sim = cloneStateForSim(base);
+      for (const e of setEdges) {
+        if (sim.gameOver) break;
+        applyMoveSim(sim, e.u, e.v);
+      }
+      // We model a cop "action" as: play some deletions then end the turn.
+      if (!sim.gameOver && sim.turn === COP) endTurn(sim);
+      return sim;
+    }
+
+    function minimaxValue(sim, depth, alpha, beta, search) {
+      if (search.timeUp()) {
+        search.timedOut = true;
+        return evalForCop(sim);
+      }
+
+      const alpha0 = alpha;
+      const beta0 = beta;
+
+      const useTT = !!search.tt;
+      const key = useTT ? ttKeyForState(sim, search.edgeCtx) : 0n;
+      const peek = useTT ? search.tt.get(key) : null;
+      const pv = peek ? peek.pv : null;
+
+      // Transposition table lookup.
+      if (useTT && depth > 0) {
+        const hit = ttGet(search.tt, key, depth);
+        if (hit) {
+          // flag: 0 exact, 1 lower bound, 2 upper bound
+          if (hit.flag === 0) return hit.val;
+          if (hit.flag === 1) alpha = Math.max(alpha, hit.val);
+          else if (hit.flag === 2) beta = Math.min(beta, hit.val);
+          if (alpha >= beta) return hit.val;
+        }
+      }
+
+      if (depth <= 0 || sim.gameOver) {
+        const v = evalForCop(sim);
+        if (useTT) ttPut(search, key, depth, v, 0, null);
+        return v;
+      }
+
+      let best;
+      let bestPv = null;
+      if (sim.turn === COP) {
+        best = -Infinity;
+        const sets = generateCopMoveSets(sim, search.cfg);
+
+        // PV move ordering
+        if (pv && pv.kind === 'C' && pv.sig) {
+          for (let i = 0; i < sets.length; i++) {
+            if (setSigFromEdges(sets[i].edges) === pv.sig) {
+              if (i !== 0) {
+                const tmp = sets[0];
+                sets[0] = sets[i];
+                sets[i] = tmp;
+              }
+              break;
+            }
+          }
+        }
+
+        for (const s of sets) {
+          const next = applyCopSetSim(sim, s.edges);
+          const val = minimaxValue(next, depth - 1, alpha, beta, search);
+          if (val > best) {
+            best = val;
+            bestPv = { kind: 'C', sig: setSigFromEdges(s.edges) };
+          }
+          if (best > alpha) alpha = best;
+          if (alpha >= beta) break;
+          if (search.timedOut) break;
+        }
+      } else {
+        // robber minimizes cop's evaluation
+        best = Infinity;
+        const moves = generateRobberMoves(sim, search.cfg);
+
+        // PV move ordering
+        if (pv && pv.kind === 'R' && pv.key) {
+          for (let i = 0; i < moves.length; i++) {
+            if (edgeKey(moves[i].u, moves[i].v) === pv.key) {
+              if (i !== 0) {
+                const tmp = moves[0];
+                moves[0] = moves[i];
+                moves[i] = tmp;
+              }
+              break;
+            }
+          }
+        }
+
+        for (const mv of moves) {
+          const next = cloneStateForSim(sim);
+          applyMoveSim(next, mv.u, mv.v);
+          const val = minimaxValue(next, depth - 1, alpha, beta, search);
+          if (val < best) {
+            best = val;
+            bestPv = { kind: 'R', key: edgeKey(mv.u, mv.v) };
+          }
+          if (best < beta) beta = best;
+          if (alpha >= beta) break;
+          if (search.timedOut) break;
+        }
+      }
+
+      if (useTT && !search.timedOut) {
+        let flag = 0; // exact
+        if (best <= alpha0) flag = 2; // upper bound
+        else if (best >= beta0) flag = 1; // lower bound
+        ttPut(search, key, depth, best, flag, bestPv);
+      }
+
+      return best;
+    }
+
+    function copBestMoveSetDeep(state, cfg) {
+      const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      const search = {
+        cfg,
+        timedOut: false,
+        edgeCtx: ensureEdgeCtx(state.k),
+        tt: new Map(),
+        ttMax: cfg.ttMax | 0,
+        timeUp: () => {
+          const t = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+          return (t - t0) > cfg.copBudgetMs;
+        }
+      };
+
+      // Iterative deepening so we always have *some* result.
+      let bestSet = [];
+      let bestScore = -Infinity;
+      for (let depth = 1; depth <= cfg.copMaxDepth; depth++) {
+        if (search.timeUp()) break;
+        search.timedOut = false;
+
+        let localBest = null;
+        let localBestScore = -Infinity;
+        const sets = generateCopMoveSets(state, cfg);
+        for (const s of sets) {
+          const next = applyCopSetSim(state, s.edges);
+          const sc = minimaxValue(next, depth - 1, -Infinity, Infinity, search);
+          if (sc > localBestScore) {
+            localBestScore = sc;
+            localBest = s.edges;
+          }
+          if (search.timedOut) break;
+        }
+
+        if (!search.timedOut && localBest) {
+          bestSet = localBest;
+          bestScore = localBestScore;
+        } else {
+          break;
+        }
+      }
+
+      // If we found nothing (should be rare), fall back.
+      return bestSet;
+    }
+
+    function robberBestMoveDeep(state, cfg) {
+      const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      const search = {
+        cfg,
+        timedOut: false,
+        edgeCtx: ensureEdgeCtx(state.k),
+        tt: new Map(),
+        ttMax: cfg.ttMax | 0,
+        timeUp: () => {
+          const t = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+          return (t - t0) > cfg.robberBudgetMs;
+        }
+      };
+
+      // Immediate win is handled by candidate generation, but keep a quick check.
+      const basic = robberCandidateMovesBasic(state, 1);
+      if (basic.length && basic[0].score >= 1e9) return { u: basic[0].u, v: basic[0].v };
+
+      let bestMove = null;
+      let bestScore = Infinity;
+
+      for (let depth = 1; depth <= cfg.robberMaxDepth; depth++) {
+        if (search.timeUp()) break;
+        search.timedOut = false;
+
+        let localBest = null;
+        let localBestScore = Infinity;
+        const moves = generateRobberMoves(state, cfg);
+        for (const mv of moves) {
+          const next = cloneStateForSim(state);
+          applyMoveSim(next, mv.u, mv.v);
+          const sc = minimaxValue(next, depth - 1, -Infinity, Infinity, search);
+          if (sc < localBestScore) {
+            localBestScore = sc;
+            localBest = { u: mv.u, v: mv.v };
+          }
+          if (search.timedOut) break;
+        }
+
+        if (!search.timedOut && localBest) {
+          bestMove = localBest;
+          bestScore = localBestScore;
+        } else {
+          break;
+        }
+      }
+
+      return bestMove || robberMajorityMinorityMove(state) || robberPaperMove(state);
+    }
+
+    function copPickEdge(state) {
+      // Heuristic cop AI:
+      // 1) try to delete a winning edge for robber: any unblocked edge between the red components of 0 and 1
+      // 2) otherwise, compute a minimum cut between those red components (respecting components)
+      //    and delete edges across that cut.
+      const k = state.k;
+      const { comps, compOf } = computeRedComponents(state);
+      const c0 = compOf[0];
+      const c1 = compOf[1];
+      if (c0 < 0 || c1 < 0 || c0 === c1) return null;
+
+      // (1) Emergency: block any edge between C0 and C1
+      for (const u of comps[c0]) {
+        for (const v of comps[c1]) {
+          if (isLegal(state, u, v)) return { u, v };
+        }
+      }
+
+      // (2) Min-cut across red components
+      const inS = minCutOnRedComponents(state, comps, compOf);
+
+      let best = null;
+      let bestCount = -1;
+      for (let i = 0; i < comps.length; i++) {
+        if (!inS[i]) continue;
+        for (let j = 0; j < comps.length; j++) {
+          if (inS[j]) continue;
+          let count = 0;
+          let candidate = null;
+          for (const u of comps[i]) {
+            for (const v of comps[j]) {
+              if (!isLegal(state, u, v)) continue;
+              count++;
+              if (!candidate) candidate = { u, v };
+            }
+          }
+          if (candidate && count > bestCount) {
+            bestCount = count;
+            best = candidate;
+          }
+        }
+      }
+
+      return best;
+    }
+
+    function maybeAutoCop() {
+      if (!els.autoCop || !els.autoCop.checked) return;
+      if (state.gameOver || state.turn !== COP) return;
+      if (layout && layout.transition) return;
+      if (autoCopScheduled) return;
+
+      autoCopScheduled = true;
+      setTimeout(() => {
+        autoCopScheduled = false;
+        if (!els.autoCop.checked) return;
+        if (state.gameOver || state.turn !== COP) return;
+
+        setAIThinking(true, COP);
+        requestAnimationFrame(() => {
+          try {
+            if (!els.autoCop.checked) return;
+            if (state.gameOver || state.turn !== COP) return;
+
+            const set = copBestMoveSetDeep(state, currentAICfg());
+
+            if (set.length === 0) {
+              // Fallback to the simple greedy heuristic if the search couldn't find candidates.
+              const startMoves = state.copMovesLeft;
+              for (let i = 0; i < startMoves; i++) {
+                if (state.gameOver || state.turn !== COP || state.copMovesLeft <= 0) break;
+                const mv = copPickEdge(state);
+                if (!mv) break;
+                applyMove(state, mv.u, mv.v);
+              }
+            } else {
+              for (const mv of set) {
+                if (state.gameOver || state.turn !== COP || state.copMovesLeft <= 0) break;
+                applyMove(state, mv.u, mv.v);
+              }
+            }
+
+            // If we didn't spend all moves, end the turn.
+            if (!state.gameOver && state.turn === COP && state.copMovesLeft > 0) {
+              state.undoStack.push(snapshotForUndo(state));
+              endTurn(state);
+            }
+
+            draw();
+          } finally {
+            setAIThinking(false);
+          }
+        });
+      }, 80);
+    }
+
+    function maybeAutoRobber() {
+      if (!els.autoRobber || !els.autoRobber.checked) return;
+      if (state.gameOver || state.turn !== ROBBER) return;
+      if (layout && layout.transition) return; // wait until the current layout animation settles
+      if (autoRobberScheduled) return;
+
+      autoRobberScheduled = true;
+      setTimeout(() => {
+        autoRobberScheduled = false;
+        if (!els.autoRobber.checked) return;
+        if (state.gameOver || state.turn !== ROBBER) return;
+
+        setAIThinking(true, ROBBER);
+        requestAnimationFrame(() => {
+          try {
+            if (!els.autoRobber.checked) return;
+            if (state.gameOver || state.turn !== ROBBER) return;
+
+            const mv = robberBestMoveDeep(state, currentAICfg());
+            if (!mv) {
+              // No legal move found (should be rare); stop auto-play.
+              els.autoRobber.checked = false;
+              draw();
+              return;
+            }
+            applyMove(state, mv.u, mv.v);
+            draw();
+          } finally {
+            setAIThinking(false);
+          }
+        });
+      }, 80);
+    }
+
+    // --- Input ----------------------------------------------------------------
+    function canvasToLocal(evt) {
+      const rect = els.canvas.getBoundingClientRect();
+      const scaleX = els.canvas.width / rect.width;
+      const scaleY = els.canvas.height / rect.height;
+      return {
+        x: (evt.clientX - rect.left) * scaleX,
+        y: (evt.clientY - rect.top) * scaleY,
+      };
+    }
+
+    function pickNodeUsingLayout(x, y, nodes) {
+      const k = state.k;
+      const rPx = 14;
+      const r = rPx / Math.max(0.0001, view.scale);
+      let best = null;
+      let bestD = Infinity;
+      for (let i = 0; i < k; i++) {
+        const dx = x - nodes[i].x;
+        const dy = y - nodes[i].y;
+        const d = Math.hypot(dx, dy);
+        if (d < r && d < bestD) {
+          bestD = d;
+          best = i;
+        }
+      }
+      return best;
+    }
+
+    function pickEdgeUsingLayout(x, y, nodes, edges) {
+      const hitPx = Number(els.hitRadius.value) || 10;
+      const hit = hitPx / Math.max(0.0001, view.scale);
+
+      let best = null;
+      let bestD = Infinity;
+      for (const e of edges) {
+        // Prefer selecting only legal (unclaimed) edges.
+        if (!isLegal(state, e.u, e.v)) continue;
+        const a = nodes[e.u], b = nodes[e.v];
+        const d = distToSegment(x, y, a.x, a.y, b.x, b.y);
+        if (d < bestD) {
+          bestD = d;
+          best = e;
+        }
+      }
+      if (best && bestD <= hit) return best;
+      return null;
+    }
+
+    function pickEdge(x, y) {
+      const k = state.k;
+      ensureLayout(k);
+      return pickEdgeUsingLayout(x, y, layout.nodes, layout.edges);
+    }
+
+    let panDragging = false;
+    let panLast = null;
+    let panMoved = false;
+    let suppressClick = false;
+
+    els.canvas.addEventListener('mousedown', (evt) => {
+      if (evt.button !== 0) return;
+      if (!evt.shiftKey) return;
+      const p = canvasToLocal(evt);
+      panDragging = true;
+      panMoved = false;
+      panLast = { x: p.x, y: p.y };
+      els.canvas.style.cursor = 'grabbing';
+      evt.preventDefault();
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (panDragging) {
+        suppressClick = panMoved;
+        panDragging = false;
+        panLast = null;
+        // cursor will be updated on next mousemove
+      }
+    });
+
+    els.canvas.addEventListener('wheel', (evt) => {
+      const p = canvasToLocal(evt);
+      const dir = Math.sign(evt.deltaY);
+      const factor = (dir < 0) ? 1.10 : 0.90;
+      setViewScale(view.scale * factor, p.x, p.y);
+      draw();
+      evt.preventDefault();
+    }, { passive: false });
+
+    els.canvas.addEventListener('click', (evt) => {
+      if (suppressClick) { suppressClick = false; return; }
+      if (evt.shiftKey) return; // shift-drag is for panning
+      if (state.gameOver) return;
+      const p = canvasToLocal(evt);
+      const w = screenToWorld(p.x, p.y);
+      const e = pickEdge(w.x, w.y);
+      if (!e) return;
+
+      const res = applyMove(state, e.u, e.v);
+      if (!res.ok) {
+        // lightweight feedback: flash border
+        els.canvas.style.borderColor = 'rgba(255, 90, 103, 0.7)';
+        setTimeout(() => els.canvas.style.borderColor = 'rgba(255,255,255,0.10)', 120);
+      }
+      draw();
+    });
+
+    els.canvas.addEventListener('mousemove', (evt) => {
+      const p = canvasToLocal(evt);
+
+      if (panDragging && panLast) {
+        const dx = p.x - panLast.x;
+        const dy = p.y - panLast.y;
+        view.offsetX += dx;
+        view.offsetY += dy;
+        panMoved = panMoved || (Math.abs(dx) + Math.abs(dy) > 0.5);
+        panLast = { x: p.x, y: p.y };
+        draw();
+        els.canvas.style.cursor = 'grabbing';
+        return;
+      }
+
+      ensureLayout(state.k);
+      const w = screenToWorld(p.x, p.y);
+
+      const nextHoverNode = pickNodeUsingLayout(w.x, w.y, layout.nodes);
+      let nextHoverEdge = null;
+      if (nextHoverNode === null) {
+        const e = pickEdgeUsingLayout(w.x, w.y, layout.nodes, layout.edges);
+        nextHoverEdge = e ? { u: e.u, v: e.v } : null;
+      }
+
+      const edgeChanged = (!hoverEdge && nextHoverEdge) || (hoverEdge && !nextHoverEdge) ||
+        (hoverEdge && nextHoverEdge && (hoverEdge.u !== nextHoverEdge.u || hoverEdge.v !== nextHoverEdge.v));
+      const nodeChanged = (hoverNode !== nextHoverNode);
+
+      if (edgeChanged || nodeChanged) {
+        hoverNode = nextHoverNode;
+        hoverEdge = nextHoverEdge;
+        draw();
+      }
+
+      if (evt.shiftKey) els.canvas.style.cursor = 'grab';
+      else els.canvas.style.cursor = nextHoverEdge ? 'pointer' : 'default';
+    });
+
+    els.canvas.addEventListener('mouseleave', () => {
+      if (panDragging) {
+        suppressClick = true;
+        panDragging = false;
+        panLast = null;
+      }
+      if (hoverEdge || hoverNode !== null) {
+        hoverEdge = null;
+        hoverNode = null;
+        draw();
+      }
+      els.canvas.style.cursor = 'default';
+    });
+
+    els.endTurn.addEventListener('click', () => {
+      if (state.turn === COP && !state.gameOver) {
+        state.undoStack.push(snapshotForUndo(state));
+        endTurn(state);
+        // Ending turn doesn't change deletions.
+        draw();
+      }
+    });
+
+    els.undo.addEventListener('click', () => {
+      undo(state);
+      draw();
+    });
+
+    function startNewFromInputs() {
+      const k = Math.max(2, Math.min(16, Number(els.k.value) || 8));
+      const n = Math.max(1, Math.min(8, Number(els.n.value) || 2));
+      els.k.value = String(k);
+      els.n.value = String(n);
+      state = makeState(k, n);
+      resetView();
+      hoverEdge = null;
+      layout = null;
+      forceNeedsRelax = true;
+      draw();
+    }
+
+    els.newGame.addEventListener('click', startNewFromInputs);
+    els.reset.addEventListener('click', () => {
+      state = makeState(state.k, state.n);
+      resetView();
+      hoverEdge = null;
+      layout = null;
+      forceNeedsRelax = true;
+      draw();
+    });
+
+    function handleCopViewChange() {
+      // Force-layout views only really make sense if you can see the remaining edges.
+      if (els.copView.value !== 'blue' && els.showNeutral.value === 'none') {
+        els.showNeutral.value = 'all';
+      }
+      // Switching views changes the layout mode (circle vs force).
+      hoverEdge = null;
+      layout = null;
+      forceNeedsRelax = true;
+      draw();
+    }
+
+    els.showNeutral.addEventListener('change', () => {
+      if (els.copView.value !== 'blue' && els.showNeutral.value === 'none') {
+        els.showNeutral.value = 'all';
+      }
+      draw();
+    });
+    els.copView.addEventListener('change', handleCopViewChange);
+    els.toggleCopView.addEventListener('click', () => {
+      const order = ['blue', 'delete', 'robber'];
+      const cur = els.copView.value || 'blue';
+      const idx = Math.max(0, order.indexOf(cur));
+      els.copView.value = order[(idx + 1) % order.length];
+      handleCopViewChange();
+    });
+    els.labels.addEventListener('change', draw);
+    els.highlight01.addEventListener('change', draw);
+    els.autoCop.addEventListener('change', () => {
+      if (!els.autoCop.checked) setAIThinking(false);
+      maybeAutoCop();
+    });
+    els.autoRobber.addEventListener('change', () => {
+      if (!els.autoRobber.checked) setAIThinking(false);
+      maybeAutoRobber();
+    });
+    if (els.thinkMode) {
+      els.thinkMode.addEventListener('change', () => {
+        // Update UI label immediately.
+        if (els.autoCop.checked || els.autoRobber.checked) draw();
+        else updateStatus();
+      });
+    }
+
+    if (els.posExport) {
+      els.posExport.addEventListener('click', () => {
+        if (!els.posText) return;
+        els.posText.value = exportPositionText(state);
+      });
+    }
+
+    if (els.posImport) {
+      els.posImport.addEventListener('click', () => {
+        if (!els.posText) return;
+        try {
+          const parsed = parsePositionTextOrUrl(els.posText.value);
+          loadPositionFromParsed(parsed);
+        } catch (e) {
+          alert(`Import failed: ${e && e.message ? e.message : e}`);
+        }
+      });
+    }
+
+    if (els.posCopy) {
+      els.posCopy.addEventListener('click', async () => {
+        if (!els.posText) return;
+        if (!els.posText.value.trim()) els.posText.value = exportPositionText(state);
+        const ok = await copyTextToClipboard(els.posText.value);
+        if (!ok) alert('Copy failed.');
+      });
+    }
+
+    if (els.posCopyLink) {
+      els.posCopyLink.addEventListener('click', async () => {
+        const h = positionHashForState(state);
+        const base = location.href.split('#')[0];
+        const url = `${base}#${h}`;
+        // Update address bar for shareability.
+        try { location.hash = h; } catch (e) { /* ignore */ }
+        const ok = await copyTextToClipboard(url);
+        if (!ok) alert('Copy failed.');
+        if (els.posText) els.posText.value = exportPositionText(state);
+      });
+    }
+
+    function zoomAboutCenter(factor) {
+      const cx = els.canvas.width * 0.5;
+      const cy = els.canvas.height * 0.5;
+      setViewScale(view.scale * factor, cx, cy);
+      draw();
+    }
+
+    if (els.zoomIn) els.zoomIn.addEventListener('click', () => zoomAboutCenter(1.15));
+    if (els.zoomOut) els.zoomOut.addEventListener('click', () => zoomAboutCenter(0.87));
+    if (els.zoomReset) els.zoomReset.addEventListener('click', () => {
+      resetView();
+      draw();
+    });
+
+    // HiDPI-ish: keep CSS size independent from backing size.
+    function resizeCanvasToDisplaySize() {
+      const rect = els.canvas.getBoundingClientRect();
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      const width = Math.round(rect.width * dpr);
+      const height = Math.round(rect.height * dpr);
+      if (els.canvas.width !== width || els.canvas.height !== height) {
+        els.canvas.width = width;
+        els.canvas.height = height;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+      }
+    }
+
+    window.addEventListener('resize', () => {
+      resizeCanvasToDisplaySize();
+      layout = null;
+      forceNeedsRelax = true;
+      draw();
+    });
+
+    // Initial
+    resizeCanvasToDisplaySize();
+    layout = null;
+    forceNeedsRelax = true;
+    if (!maybeLoadPositionFromUrl()) draw();
+  </script>
+</body>
+</html>
