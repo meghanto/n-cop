@@ -24,7 +24,7 @@ AI note: use the **Think** selector (Light/Deep) in the top bar to control searc
 - **Move list**: the left panel includes a chess-like move list (rounds), e.g. `C: (u,v);(x,y)  R: (a,b)`.
 - **Position import/export**: use the **Position** box to export the current game (human-readable, using the same move notation) and to import a pasted position.
   - **Copy Link** generates a shareable URL with a `#k=...&n=...&m=...` hash that auto-loads when opened.
-- **Animation export**: click **Export** to export the **move timeline** from start → current position using the **current cop view**. Choose format: **GIF**, **MP4**, **WebM**, or **animated WebP**. It also adds a short pause on the final position. This lazily downloads ffmpeg.wasm on first use (large download) and requires running over `https://` (works on GitHub Pages). (Shift-click **Export** to export the view-modes demo animation.)
+- **Animation extract**: click **Extract** to export the **move timeline** from start → current position using the **current cop view**. Choose format: **GIF**, **MP4**, **WebM**, or **animated WebP**. It also adds a short pause on the final position. This lazily downloads ffmpeg.wasm on first use (large download) and requires running over `https://` (works on GitHub Pages). (Shift-click **Extract** to export the view-modes demo animation.)
 - **Zoom/Pan**: mouse wheel zooms (around the cursor). Hold **Shift** and drag to pan. Use the `+`, `−`, and `Reset` buttons in the top bar.
 - **Cop edges view**:
   - **Show as blue edges**: blocked edges are drawn in blue.
