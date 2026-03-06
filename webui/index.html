@@ -1119,18 +1119,26 @@
 
     // --- Visual flash cues ----------------------------------------------------
     let exportNowMs = null; // during exports: deterministic "time" for animations
+    let exportFpsForAnim = null; // during exports: used to convert "N frames" -> ms
     function nowMs() { return (exportNowMs !== null) ? exportNowMs : performance.now(); }
+
+    const BLUE_FLASH_FRAMES_EXPORT = 12; // constant number of frames to show a deleted cop edge during exports
 
     // Flash newly-blocked cop edges in deletions/robber views so the user can see what changed.
     // Map edgeKey -> { u, v, startMs, durMs }
     const blueFlash = new Map();
     let suppressBlueFlash = false;
 
-    function flashBlueEdge(u, v, durMs = 650) {
-      if (suppressBlueFlash) return;
+    function flashBlueEdge(u, v, durMs = null, force = false) {
+      if (suppressBlueFlash && !force) return;
+      let d = durMs;
+      if (d === null || d === undefined) {
+        if (exportNowMs !== null && exportFpsForAnim) d = (BLUE_FLASH_FRAMES_EXPORT * 1000) / exportFpsForAnim;
+        else d = 650;
+      }
       const key = edgeKey(u, v);
       const a = Math.min(u, v), b = Math.max(u, v);
-      blueFlash.set(key, { u: a, v: b, startMs: nowMs(), durMs });
+      blueFlash.set(key, { u: a, v: b, startMs: nowMs(), durMs: d });
     }
 
     function clearExpiredBlueFlashes() {
@@ -1505,6 +1513,8 @@
       try {
         exportBusy = true;
         exportNowMs = 0;
+        exportFpsForAnim = null;
+        suppressBlueFlash = true;
         blueFlash.clear();
         showExportOverlay('Preparing GIF export…', `Timeline (${orig.copView} view)`, null);
 
@@ -1547,6 +1557,7 @@
         }));
 
         const fps = (orig.copView === 'blue') ? clamp(Math.round(hlen / 14), 4, 18) : 50;
+        exportFpsForAnim = fps;
         const endHoldSecs = 1.6;
         const endHoldFrames = Math.max(0, Math.round(endHoldSecs * fps));
 
@@ -1659,10 +1670,23 @@
 
             // state updates immediately to step i+1, but we animate positions from old -> new.
             exportNowMs = frameIdx * (1000 / fps);
+
+            // Flash any newly-blocked cop edges (constant number of frames in exports)
+            const prevSnap = state.history[i];
+            const nextSnap = state.history[i + 1];
+            if (prevSnap && nextSnap && nextSnap.blue) {
+              for (const key of nextSnap.blue) {
+                if (!prevSnap.blue || !prevSnap.blue.has(key)) {
+                  const [u, v] = parseEdgeKey(key);
+                  flashBlueEdge(u, v, null, true);
+                }
+              }
+            }
+
             gotoHistory(state, i + 1);
 
             for (let f = 1; f <= transFrames; f++) {
-              const t = smoothstep(f / transFrames);
+              const t = f / transFrames; // linear => constant speed during transition
               layout = { k, mode: 'force', nodes: lerpNodes(from, to, t), edges, transition: null };
               showExportOverlay('Capturing frames…', `Step ${i + 2}/${hlen} (transition)`, (frameIdx / totalFrames) * 0.55);
               await writeFrame();
@@ -1732,6 +1756,7 @@
 
         suppressBlueFlash = true;
         exportNowMs = null;
+        exportFpsForAnim = null;
         blueFlash.clear();
 
         // Restore UI + state
@@ -1771,6 +1796,8 @@
       try {
         exportBusy = true;
         exportNowMs = 0;
+        exportFpsForAnim = null;
+        suppressBlueFlash = true;
         blueFlash.clear();
         showExportOverlay('Preparing GIF export…', 'Loading ffmpeg if needed…', null);
 
@@ -1787,6 +1814,7 @@
         const edges = computeCompleteEdges(k);
 
         const fps = 30;
+        exportFpsForAnim = fps;
         const holdSecs = 1.1;
         const transSecs = 0.9;
         const holdFrames = Math.max(1, Math.round(holdSecs * fps));
@@ -1861,7 +1889,7 @@
           els.copView.value = 'delete';
           const to = computeForceNodesForCurrentCopView();
           for (let f = 1; f <= transFrames; f++) {
-            const t = smoothstep(f / transFrames);
+            const t = f / transFrames; // linear => constant speed during transition
             layout = { k, mode: 'force', nodes: lerpNodes(from, to, t), edges, transition: null };
             showExportOverlay('Capturing frames…', `Transition: blue → delete (${f}/${transFrames})`, (frameIdx / totalFrames) * 0.60);
             await writeFrame(frameIdx++);
@@ -1881,7 +1909,7 @@
           els.copView.value = 'robber';
           const to = computeForceNodesForCurrentCopView();
           for (let f = 1; f <= transFrames; f++) {
-            const t = smoothstep(f / transFrames);
+            const t = f / transFrames; // linear => constant speed during transition
             layout = { k, mode: 'force', nodes: lerpNodes(from, to, t), edges, transition: null };
             showExportOverlay('Capturing frames…', `Transition: delete → robber (${f}/${transFrames})`, (frameIdx / totalFrames) * 0.60);
             await writeFrame(frameIdx++);
@@ -1937,6 +1965,7 @@
 
         suppressBlueFlash = true;
         exportNowMs = null;
+        exportFpsForAnim = null;
         blueFlash.clear();
 
         // restore UI
@@ -2396,16 +2425,15 @@
         const blueCol = getComputedStyle(document.documentElement).getPropertyValue('--blue').trim() || '#4da3ff';
         ctx.save();
         ctx.strokeStyle = blueCol;
-        ctx.lineWidth = 6;
+        ctx.lineWidth = 7;
         ctx.lineCap = 'round';
         for (const [k, f] of blueFlash) {
           const age = t - f.startMs;
           if (age < 0) continue;
           const tt = Math.max(0, Math.min(1, age / Math.max(1, f.durMs)));
-          // Fade out with a gentle pulse.
-          const fade = Math.pow(1 - tt, 1.4);
-          const pulse = 0.65 + 0.35 * Math.sin((age / 1000) * Math.PI * 6);
-          ctx.globalAlpha = Math.max(0, Math.min(1, fade * pulse));
+          // Constant-speed fade out (avoid pulse shimmer in exports)
+          const fade = Math.max(0, 1 - tt);
+          ctx.globalAlpha = fade;
 
           const a = nodes[f.u], b = nodes[f.v];
           ctx.beginPath();
