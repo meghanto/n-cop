@@ -1330,6 +1330,7 @@
     async function exportGifMovesTimeline() {
       // Exports a GIF that cycles from history step 0 → last step.
       // Uses the *current* cop view mode (blue/delete/robber).
+      // For delete/robber (force layouts), we generate smooth interpolation between steps at 30fps.
       const orig = {
         copView: els.copView.value,
         showNeutral: els.showNeutral.value,
@@ -1356,22 +1357,12 @@
         const hlen = (state.history && state.history.length) ? state.history.length : 0;
         if (hlen <= 0) throw new Error('No history to export.');
 
-        // Pick fps so total duration is ~12–18s.
-        const targetSecs = 14;
-        const fps = clamp(Math.round(hlen / targetSecs), 4, 18);
-        const endHoldSecs = 1.6; // pause on the final position
-        const endHoldFrames = Math.max(0, Math.round(endHoldSecs * fps));
-        const totalFrames = hlen + endHoldFrames;
-        const targetW = 900;
+        const k = state.k;
+        const edges = computeCompleteEdges(k);
 
+        const targetW = 900;
         const bgMode = (els.bgMode && els.bgMode.value) ? els.bgMode.value : 'dark';
         const preserveAlpha = (bgMode === 'transparent');
-        const paletteGenVF = preserveAlpha
-          ? `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen=reserve_transparent=1`
-          : `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen`;
-        const paletteUseLavfi = preserveAlpha
-          ? `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a:alpha_threshold=128`
-          : `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a`;
 
         // Clean any prior outputs/frames if present.
         try {
@@ -1385,44 +1376,137 @@
         try { await ffmpeg.deleteFile('out.gif'); } catch {}
         try { await ffmpeg.deleteFile('palette.png'); } catch {}
 
-        exportLayoutInstant = true;
-
         const pad = (n, w) => String(n).padStart(w, '0');
+        const smoothstep = (t) => t * t * (3 - 2 * t);
+        const lerpNodes = (A, B, t) => A.map((a, i) => ({
+          x: a.x + (B[i].x - a.x) * t,
+          y: a.y + (B[i].y - a.y) * t,
+        }));
+
+        const fps = (orig.copView === 'blue') ? clamp(Math.round(hlen / 14), 4, 18) : 30;
+        const endHoldSecs = 1.6;
+        const endHoldFrames = Math.max(0, Math.round(endHoldSecs * fps));
+
+        const paletteGenVF = preserveAlpha
+          ? `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen=reserve_transparent=1`
+          : `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen`;
+        const paletteUseLavfi = preserveAlpha
+          ? `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a:alpha_threshold=128`
+          : `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a`;
 
         let lastPng = null;
-        for (let i = 0; i < hlen; i++) {
-          // Jump to history step i.
-          gotoHistory(state, i);
-          hoverEdge = null;
-          hoverNode = null;
-          layout = null;
-          forceNeedsRelax = true;
-          draw();
 
-          const png = await canvasToPngU8Scaled(targetW);
-          // ffmpeg.writeFile() may transfer (detach) the passed ArrayBuffer,
-          // so keep a separate copy for any later reuse (e.g., end-hold).
-          lastPng = png.slice();
-          const name = `frame${pad(i, 4)}.png`;
-          await ffmpeg.writeFile(name, png);
+        // --- Mode A: blue view (no force animation) --------------------------
+        if (orig.copView === 'blue') {
+          const totalFrames = hlen + endHoldFrames;
+          exportLayoutInstant = true;
 
-          if (i % 2 === 0) {
-            const frac = (i + 1) / Math.max(1, totalFrames);
-            showExportOverlay('Capturing frames…', `Step ${i + 1}/${hlen} @ ${fps} fps`, frac * 0.55);
-            await sleep(0);
-          }
-        }
+          for (let i = 0; i < hlen; i++) {
+            gotoHistory(state, i);
+            hoverEdge = null;
+            hoverNode = null;
+            layout = null;
+            forceNeedsRelax = true;
+            draw();
 
-        // Pause on the final configuration by repeating the last frame.
-        if (lastPng && endHoldFrames > 0) {
-          for (let j = 0; j < endHoldFrames; j++) {
-            const idx = hlen + j;
-            const name = `frame${pad(idx, 4)}.png`;
-            await ffmpeg.writeFile(name, lastPng.slice());
-            if (j % 4 === 0) {
-              const frac = (hlen + j + 1) / Math.max(1, totalFrames);
-              showExportOverlay('Capturing frames…', `Hold final (${j + 1}/${endHoldFrames})`, frac * 0.55);
+            const png = await canvasToPngU8Scaled(targetW);
+            lastPng = png.slice();
+            await ffmpeg.writeFile(`frame${pad(i, 4)}.png`, png);
+
+            if (i % 2 === 0) {
+              const frac = (i + 1) / Math.max(1, totalFrames);
+              showExportOverlay('Capturing frames…', `Step ${i + 1}/${hlen} @ ${fps} fps`, frac * 0.55);
               await sleep(0);
+            }
+          }
+
+          if (lastPng && endHoldFrames > 0) {
+            for (let j = 0; j < endHoldFrames; j++) {
+              const idx = hlen + j;
+              await ffmpeg.writeFile(`frame${pad(idx, 4)}.png`, lastPng.slice());
+            }
+          }
+        } else {
+          // --- Mode B: delete/robber (force) with smooth interpolation --------
+          // We animate like the in-app layout transitions: after each move, the state updates immediately,
+          // while node positions interpolate from the previous converged layout to the new converged layout.
+
+          exportLayoutManual = true;
+          exportLayoutInstant = true;
+          forceAnimRunning = false;
+          forceNeedsRelax = false;
+
+          const holdFrames = 1; // brief pause per position
+          const targetSecs = 16;
+          const targetFrames = Math.max(1, Math.round(targetSecs * fps));
+          const baseFrames = (hlen * holdFrames) + endHoldFrames;
+          const transFrames = clamp(Math.floor((targetFrames - baseFrames) / Math.max(1, hlen - 1)), 1, 12);
+
+          // Precompute converged layouts for every step.
+          showExportOverlay('Preparing GIF export…', `Computing layouts (${hlen} steps)…`, 0);
+          const pos = new Array(hlen);
+          for (let i = 0; i < hlen; i++) {
+            gotoHistory(state, i);
+            layout = { k, mode: 'force', nodes: computeCircleNodes(k), edges, transition: null };
+            pos[i] = computeDeletionViewLayoutFromRing();
+            if (i % 2 === 0) {
+              showExportOverlay('Preparing GIF export…', `Computing layouts (${i + 1}/${hlen})…`, (i + 1) / hlen * 0.20);
+              await sleep(0);
+            }
+          }
+
+          const totalFrames = (hlen * holdFrames) + ((hlen - 1) * transFrames) + endHoldFrames;
+          let frameIdx = 0;
+
+          async function writeFrame() {
+            draw();
+            const png = await canvasToPngU8Scaled(targetW);
+            lastPng = png.slice();
+            await ffmpeg.writeFile(`frame${pad(frameIdx, 4)}.png`, png);
+            frameIdx++;
+          }
+
+          // Start at step 0
+          gotoHistory(state, 0);
+          layout = { k, mode: 'force', nodes: pos[0].map(p => ({ x: p.x, y: p.y })), edges, transition: null };
+
+          for (let h = 0; h < holdFrames; h++) {
+            showExportOverlay('Capturing frames…', `Step 1/${hlen}`, (frameIdx / totalFrames) * 0.55);
+            await writeFrame();
+          }
+
+          for (let i = 0; i < hlen - 1; i++) {
+            const from = pos[i];
+            const to = pos[i + 1];
+
+            // state updates immediately to step i+1, but we animate positions from old -> new.
+            gotoHistory(state, i + 1);
+
+            for (let f = 1; f <= transFrames; f++) {
+              const t = smoothstep(f / transFrames);
+              layout = { k, mode: 'force', nodes: lerpNodes(from, to, t), edges, transition: null };
+              showExportOverlay('Capturing frames…', `Step ${i + 2}/${hlen} (transition)`, (frameIdx / totalFrames) * 0.55);
+              await writeFrame();
+              if (f % 6 === 0) await sleep(0);
+            }
+
+            layout = { k, mode: 'force', nodes: to.map(p => ({ x: p.x, y: p.y })), edges, transition: null };
+            for (let h = 0; h < holdFrames; h++) {
+              showExportOverlay('Capturing frames…', `Step ${i + 2}/${hlen}`, (frameIdx / totalFrames) * 0.55);
+              await writeFrame();
+              if (h === 0) await sleep(0);
+            }
+          }
+
+          // End hold
+          if (lastPng && endHoldFrames > 0) {
+            for (let j = 0; j < endHoldFrames; j++) {
+              await ffmpeg.writeFile(`frame${pad(frameIdx, 4)}.png`, lastPng.slice());
+              frameIdx++;
+              if (j % 8 === 0) {
+                showExportOverlay('Capturing frames…', `Hold final (${j + 1}/${endHoldFrames})`, (frameIdx / totalFrames) * 0.55);
+                await sleep(0);
+              }
             }
           }
         }
@@ -1468,7 +1552,9 @@
       } catch (e) {
         showExportOverlay('Export failed', (e && e.message) ? e.message : String(e), null);
       } finally {
+        exportLayoutManual = false;
         exportLayoutInstant = false;
+
         // Restore UI + state
         els.copView.value = orig.copView;
         els.showNeutral.value = orig.showNeutral;
