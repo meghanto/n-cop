@@ -704,6 +704,8 @@
         if (state.copMovesLeft <= 0) return { ok: false, reason: 'no cop moves left' };
         state.blue.add(key);
         recordMove(state, COP, u, v);
+        // Flash the deleted (blocked) edge briefly when cop edges are hidden.
+        flashBlueEdge(u, v);
         state.copMovesLeft--;
         recomputeGameOver(state);
         if (!state.gameOver && state.copMovesLeft === 0) endTurn(state);
@@ -731,14 +733,25 @@
       if (!state.history || !state.history.length) return;
       const i = Math.max(0, Math.min(state.history.length - 1, idx | 0));
       state.historyIndex = i;
-      const blueBefore = state.blue.size;
+      const blueBeforeSet = new Set(state.blue);
       const redBefore = state.red.size;
       restoreFromUndoSnapshot(state, state.history[i]);
 
+      // Flash any newly-added cop deletions when viewing in hide-blue modes.
+      // (Useful for understanding what changed when stepping through history.)
+      if (els.copView && els.copView.value !== 'blue') {
+        for (const key of state.blue) {
+          if (!blueBeforeSet.has(key)) {
+            const [u, v] = parseEdgeKey(key);
+            flashBlueEdge(u, v);
+          }
+        }
+      }
+
       if (els.copView) {
         const v = els.copView.value;
-        if (v === 'delete' && state.blue.size !== blueBefore) forceNeedsRelax = true;
-        if (v === 'robber' && (state.blue.size !== blueBefore || state.red.size !== redBefore)) forceNeedsRelax = true;
+        if (v === 'delete' && state.blue.size !== blueBeforeSet.size) forceNeedsRelax = true;
+        if (v === 'robber' && (state.blue.size !== blueBeforeSet.size || state.red.size !== redBefore)) forceNeedsRelax = true;
       }
     }
 
@@ -1097,6 +1110,29 @@
 
     function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
 
+    // --- Visual flash cues ----------------------------------------------------
+    let exportNowMs = null; // during exports: deterministic "time" for animations
+    function nowMs() { return (exportNowMs !== null) ? exportNowMs : performance.now(); }
+
+    // Flash newly-blocked cop edges in deletions/robber views so the user can see what changed.
+    // Map edgeKey -> { u, v, startMs, durMs }
+    const blueFlash = new Map();
+    let suppressBlueFlash = false;
+
+    function flashBlueEdge(u, v, durMs = 650) {
+      if (suppressBlueFlash) return;
+      const key = edgeKey(u, v);
+      const a = Math.min(u, v), b = Math.max(u, v);
+      blueFlash.set(key, { u: a, v: b, startMs: nowMs(), durMs });
+    }
+
+    function clearExpiredBlueFlashes() {
+      const t = nowMs();
+      for (const [k, f] of blueFlash) {
+        if (t - f.startMs > f.durMs + 50) blueFlash.delete(k);
+      }
+    }
+
     function screenToWorld(x, y) {
       return {
         x: (x - view.offsetX) / view.scale,
@@ -1343,6 +1379,8 @@
       let succeeded = false;
       try {
         exportBusy = true;
+        exportNowMs = 0;
+        blueFlash.clear();
         showExportOverlay('Preparing GIF export…', `Timeline (${orig.copView} view)`, null);
 
         // stop autoplay during export
@@ -1403,6 +1441,7 @@
           exportLayoutInstant = true;
 
           for (let i = 0; i < hlen; i++) {
+            exportNowMs = i * (1000 / fps);
             gotoHistory(state, i);
             hoverEdge = null;
             hoverNode = null;
@@ -1455,6 +1494,7 @@
           // Precompute converged layouts for every step.
           showExportOverlay('Preparing GIF export…', `Computing layouts (${hlen} steps)… (transition frames/move: ${transFrames}, ${fps}fps)`, 0);
           const pos = new Array(hlen);
+          suppressBlueFlash = true;
           for (let i = 0; i < hlen; i++) {
             gotoHistory(state, i);
             layout = { k, mode: 'force', nodes: computeCircleNodes(k), edges, transition: null };
@@ -1464,11 +1504,13 @@
               await sleep(0);
             }
           }
+          suppressBlueFlash = false;
 
           const totalFrames = (hlen * holdFrames) + ((hlen - 1) * transFrames) + endHoldFrames;
           let frameIdx = 0;
 
           async function writeFrame() {
+            exportNowMs = frameIdx * (1000 / fps);
             draw();
             const png = await canvasToPngU8Scaled(targetW);
             lastPng = png.slice();
@@ -1477,6 +1519,7 @@
           }
 
           // Start at step 0
+          exportNowMs = 0;
           gotoHistory(state, 0);
           layout = { k, mode: 'force', nodes: pos[0].map(p => ({ x: p.x, y: p.y })), edges, transition: null };
 
@@ -1490,6 +1533,7 @@
             const to = pos[i + 1];
 
             // state updates immediately to step i+1, but we animate positions from old -> new.
+            exportNowMs = frameIdx * (1000 / fps);
             gotoHistory(state, i + 1);
 
             for (let f = 1; f <= transFrames; f++) {
@@ -1566,6 +1610,10 @@
         exportLayoutManual = false;
         exportLayoutInstant = false;
 
+        suppressBlueFlash = true;
+        exportNowMs = null;
+        blueFlash.clear();
+
         // Restore UI + state
         els.copView.value = orig.copView;
         els.showNeutral.value = orig.showNeutral;
@@ -1582,6 +1630,7 @@
         forceNeedsRelax = true;
         draw();
 
+        suppressBlueFlash = false;
         exportBusy = false;
         if (succeeded) hideExportOverlay();
         handleCopViewChange();
@@ -1601,6 +1650,8 @@
       let succeeded = false;
       try {
         exportBusy = true;
+        exportNowMs = 0;
+        blueFlash.clear();
         showExportOverlay('Preparing GIF export…', 'Loading ffmpeg if needed…', null);
 
         // stop autoplay during export
@@ -1660,6 +1711,7 @@
         }
 
         async function writeFrame(idx) {
+          exportNowMs = idx * (1000 / fps);
           draw();
           const png = await canvasToPngU8Scaled(targetW);
           await ffmpeg.writeFile(`frame${pad(idx, 4)}.png`, png);
@@ -1768,6 +1820,10 @@
         exportLayoutManual = false;
         exportLayoutInstant = false;
 
+        suppressBlueFlash = true;
+        exportNowMs = null;
+        blueFlash.clear();
+
         // restore UI
         els.copView.value = orig.copView;
         els.showNeutral.value = orig.showNeutral;
@@ -1780,6 +1836,7 @@
 
         layout = null;
         forceNeedsRelax = true;
+        suppressBlueFlash = false;
         exportBusy = false;
         if (succeeded) hideExportOverlay();
         handleCopViewChange();
@@ -2124,6 +2181,8 @@
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, w, h);
 
+      if (blueFlash.size) clearExpiredBlueFlashes();
+
       // Background (painted into the canvas so exports match what you see)
       const bgMode = (els.bgMode && els.bgMode.value) ? els.bgMode.value : 'dark';
       let bgFill = null;
@@ -2215,6 +2274,32 @@
         ctx.stroke();
       }
       ctx.restore();
+
+      // Flash newly-blocked cop edges in hide-blue views.
+      if (copView !== 'blue' && blueFlash.size) {
+        const t = nowMs();
+        const blueCol = getComputedStyle(document.documentElement).getPropertyValue('--blue').trim() || '#4da3ff';
+        ctx.save();
+        ctx.strokeStyle = blueCol;
+        ctx.lineWidth = 6;
+        ctx.lineCap = 'round';
+        for (const [k, f] of blueFlash) {
+          const age = t - f.startMs;
+          if (age < 0) continue;
+          const tt = Math.max(0, Math.min(1, age / Math.max(1, f.durMs)));
+          // Fade out with a gentle pulse.
+          const fade = Math.pow(1 - tt, 1.4);
+          const pulse = 0.65 + 0.35 * Math.sin((age / 1000) * Math.PI * 6);
+          ctx.globalAlpha = Math.max(0, Math.min(1, fade * pulse));
+
+          const a = nodes[f.u], b = nodes[f.v];
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
 
       // Hover vertex highlight: show the directly-connected (non-blue) edges.
       if (hoverNode !== null && hoverNbrs) {
