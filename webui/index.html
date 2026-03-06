@@ -1643,11 +1643,13 @@
           // Precompute converged layouts for every step.
           showExportOverlay('Preparing GIF export…', `Computing layouts (${hlen} steps)…`, 0);
           const pos = new Array(hlen);
+          const part = (orig.copView === 'contract') ? new Array(hlen) : null;
           suppressBlueFlash = true;
           for (let i = 0; i < hlen; i++) {
             gotoHistory(state, i);
             layout = { k, mode: 'force', nodes: computeCircleNodes(k), edges, transition: null };
             pos[i] = computeDeletionViewLayoutFromRing();
+            if (part) part[i] = computeRedComponents(state);
             if (i % 2 === 0) {
               showExportOverlay('Preparing GIF export…', `Computing layouts (${i + 1}/${hlen})…`, (i + 1) / hlen * 0.20);
               await sleep(0);
@@ -1732,11 +1734,36 @@
               }
             }
 
+            // Contract-view merge animation needs transition metadata so draw() can render the
+            // contraction/metaball step during exports.
+            let contractAnim = null;
+            if (orig.copView === 'contract' && part && part[i] && part[i + 1]) {
+              const beforeCount = part[i].comps ? part[i].comps.length : 0;
+              const afterCount = part[i + 1].comps ? part[i + 1].comps.length : 0;
+              if (afterCount > 0 && beforeCount > 0 && afterCount < beforeCount) {
+                contractAnim = { from: part[i], to: part[i + 1] };
+              }
+            }
+            const trStartMs = frameIdx * (1000 / fps);
+            const trDurMs = tf * (1000 / fps);
+
             gotoHistory(state, i + 1);
 
             for (let f = 1; f <= tf; f++) {
               const t = f / tf; // linear => constant speed during transition (per frame)
-              layout = { k, mode: 'force', nodes: lerpNodes(from, to, t), edges, transition: null };
+              layout = {
+                k,
+                mode: 'force',
+                nodes: lerpNodes(from, to, t),
+                edges,
+                transition: contractAnim ? {
+                  from,
+                  to,
+                  startMs: trStartMs,
+                  durMs: trDurMs,
+                  contractAnim,
+                } : null,
+              };
               showExportOverlay('Capturing frames…', `Step ${i + 2}/${hlen} (transition)`, (frameIdx / totalFrames) * 0.55);
               await writeFrame();
               if (f % 10 === 0) await sleep(0);
