@@ -308,7 +308,7 @@
       height: 640px;
       border-radius: 14px;
       border: 1px solid rgba(255,255,255,0.10);
-      background: rgba(0,0,0,0.22);
+      background: transparent; /* actual background is painted in draw() so exports match */
       display: block;
     }
 
@@ -350,6 +350,22 @@
         <div>
           <label for="hitRadius">Click tolerance</label>
           <input id="hitRadius" type="number" min="4" max="30" value="10" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label for="bgMode">Background</label>
+          <select id="bgMode">
+            <option value="dark" selected>Dark blue</option>
+            <option value="dark2">Dark gray</option>
+            <option value="light">Light</option>
+            <option value="transparent">Transparent</option>
+          </select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <div class="posHelp" style="margin:0">Applies to exports too.</div>
         </div>
       </div>
 
@@ -1019,6 +1035,7 @@
       n: document.getElementById('n'),
       showNeutral: document.getElementById('showNeutral'),
       hitRadius: document.getElementById('hitRadius'),
+      bgMode: document.getElementById('bgMode'),
       copView: document.getElementById('copView'),
       toggleCopView: document.getElementById('toggleCopView'),
       labels: document.getElementById('labels'),
@@ -1341,6 +1358,9 @@
         // Pick fps so total duration is ~12–18s.
         const targetSecs = 14;
         const fps = clamp(Math.round(hlen / targetSecs), 4, 18);
+        const endHoldSecs = 1.6; // pause on the final position
+        const endHoldFrames = Math.max(0, Math.round(endHoldSecs * fps));
+        const totalFrames = hlen + endHoldFrames;
         const targetW = 900;
 
         // Clean any prior outputs/frames if present.
@@ -1359,6 +1379,7 @@
 
         const pad = (n, w) => String(n).padStart(w, '0');
 
+        let lastPng = null;
         for (let i = 0; i < hlen; i++) {
           // Jump to history step i.
           gotoHistory(state, i);
@@ -1369,13 +1390,28 @@
           draw();
 
           const png = await canvasToPngU8Scaled(targetW);
+          lastPng = png;
           const name = `frame${pad(i, 4)}.png`;
           await ffmpeg.writeFile(name, png);
 
           if (i % 2 === 0) {
-            const frac = (i + 1) / hlen;
+            const frac = (i + 1) / Math.max(1, totalFrames);
             showExportOverlay('Capturing frames…', `Step ${i + 1}/${hlen} @ ${fps} fps`, frac * 0.55);
             await sleep(0);
+          }
+        }
+
+        // Pause on the final configuration by repeating the last frame.
+        if (lastPng && endHoldFrames > 0) {
+          for (let j = 0; j < endHoldFrames; j++) {
+            const idx = hlen + j;
+            const name = `frame${pad(idx, 4)}.png`;
+            await ffmpeg.writeFile(name, lastPng);
+            if (j % 4 === 0) {
+              const frac = (hlen + j + 1) / Math.max(1, totalFrames);
+              showExportOverlay('Capturing frames…', `Hold final (${j + 1}/${endHoldFrames})`, frac * 0.55);
+              await sleep(0);
+            }
           }
         }
 
@@ -1911,18 +1947,34 @@
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, w, h);
 
-      // background grid-ish
-      ctx.save();
-      ctx.globalAlpha = 0.12;
-      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-      ctx.lineWidth = 1;
-      for (let x = 40; x < w; x += 80) {
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      // Background (painted into the canvas so exports match what you see)
+      const bgMode = (els.bgMode && els.bgMode.value) ? els.bgMode.value : 'dark';
+      let bgFill = null;
+      if (bgMode === 'dark') bgFill = 'rgb(6, 16, 38)';       // dark blue
+      if (bgMode === 'dark2') bgFill = 'rgb(16, 18, 24)';     // dark gray
+      if (bgMode === 'light') bgFill = 'rgb(248, 250, 255)';  // light
+
+      if (bgFill) {
+        ctx.save();
+        ctx.fillStyle = bgFill;
+        ctx.fillRect(0, 0, w, h);
+        ctx.restore();
       }
-      for (let y = 40; y < h; y += 80) {
-        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+
+      // background grid-ish (skip for transparent)
+      if (bgMode !== 'transparent') {
+        ctx.save();
+        ctx.globalAlpha = (bgMode === 'light') ? 0.18 : 0.12;
+        ctx.strokeStyle = (bgMode === 'light') ? 'rgba(0,0,0,0.10)' : 'rgba(255,255,255,0.08)';
+        ctx.lineWidth = 1;
+        for (let x = 40; x < w; x += 80) {
+          ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+        }
+        for (let y = 40; y < h; y += 80) {
+          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+        }
+        ctx.restore();
       }
-      ctx.restore();
 
       // Apply zoom/pan for graph drawing (keep background grid in screen space)
       ctx.save();
@@ -3998,6 +4050,7 @@
       }
       draw();
     });
+    if (els.bgMode) els.bgMode.addEventListener('change', draw);
     els.copView.addEventListener('change', handleCopViewChange);
     els.toggleCopView.addEventListener('click', () => {
       const order = ['blue', 'delete', 'robber'];
