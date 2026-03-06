@@ -403,7 +403,7 @@
           <button id="posImport" type="button">Import</button>
           <button id="posCopy" type="button">Copy</button>
           <button id="posCopyLink" type="button">Copy Link</button>
-          <button id="exportGif" type="button" title="Loads ffmpeg.wasm on demand">Export GIF</button>
+          <button id="exportGif" type="button" title="Exports a move-timeline GIF for the current cop view (Shift-click: view-modes demo). Loads ffmpeg.wasm on demand">Export GIF</button>
         </div>
         <div class="posHelp">Export uses the same move notation as the Moves list. “Copy Link” writes a URL hash like <code>#k=8&amp;n=2&amp;t=C&amp;l=2&amp;m=0-2~1-5.3-4~</code> which auto-loads on open.</div>
       </div>
@@ -1070,6 +1070,7 @@
 
     let forceAnimRunning = false;
     let forceNeedsRelax = false;
+    let exportLayoutInstant = false; // during exports: skip smooth transitions; capture stable layouts
     let autoCopScheduled = false;
     let autoRobberScheduled = false;
 
@@ -1306,6 +1307,140 @@
       if (!blob) throw new Error('Failed to capture frame');
       const buf = await blob.arrayBuffer();
       return new Uint8Array(buf);
+    }
+
+    async function exportGifMovesTimeline() {
+      // Exports a GIF that cycles from history step 0 → last step.
+      // Uses the *current* cop view mode (blue/delete/robber).
+      const orig = {
+        copView: els.copView.value,
+        showNeutral: els.showNeutral.value,
+        autoCop: els.autoCop.checked,
+        autoRobber: els.autoRobber.checked,
+        view: { scale: view.scale, offsetX: view.offsetX, offsetY: view.offsetY },
+        historyIndex: state.historyIndex | 0,
+      };
+
+      let succeeded = false;
+      try {
+        exportBusy = true;
+        showExportOverlay('Preparing GIF export…', `Timeline (${orig.copView} view)`, null);
+
+        // stop autoplay during export
+        els.autoCop.checked = false;
+        els.autoRobber.checked = false;
+
+        // stabilize view for capture
+        resetView();
+
+        const ffmpeg = await ensureFFmpegLoaded();
+
+        const hlen = (state.history && state.history.length) ? state.history.length : 0;
+        if (hlen <= 0) throw new Error('No history to export.');
+
+        // Pick fps so total duration is ~12–18s.
+        const targetSecs = 14;
+        const fps = clamp(Math.round(hlen / targetSecs), 4, 18);
+        const targetW = 900;
+
+        // Clean any prior outputs/frames if present.
+        try {
+          const items = await ffmpeg.listDir('/');
+          for (const it of items) {
+            if (it && it.name && /^frame\d+\.png$/.test(it.name)) {
+              try { await ffmpeg.deleteFile(it.name); } catch { /* ignore */ }
+            }
+          }
+        } catch { /* ignore */ }
+        try { await ffmpeg.deleteFile('out.gif'); } catch {}
+        try { await ffmpeg.deleteFile('palette.png'); } catch {}
+
+        exportLayoutInstant = true;
+
+        const pad = (n, w) => String(n).padStart(w, '0');
+
+        for (let i = 0; i < hlen; i++) {
+          // Jump to history step i.
+          gotoHistory(state, i);
+          hoverEdge = null;
+          hoverNode = null;
+          layout = null;
+          forceNeedsRelax = true;
+          draw();
+
+          const png = await canvasToPngU8Scaled(targetW);
+          const name = `frame${pad(i, 4)}.png`;
+          await ffmpeg.writeFile(name, png);
+
+          if (i % 2 === 0) {
+            const frac = (i + 1) / hlen;
+            showExportOverlay('Capturing frames…', `Step ${i + 1}/${hlen} @ ${fps} fps`, frac * 0.55);
+            await sleep(0);
+          }
+        }
+
+        // Encode GIF
+        const progHandler = (p) => {
+          const r = (p && (p.ratio ?? p.progress)) || 0;
+          const mapped = 0.55 + 0.45 * Math.max(0, Math.min(1, r));
+          showExportOverlay('Encoding GIF…', `ffmpeg running… (${Math.round(r * 100)}%)`, mapped);
+        };
+        ffmpeg.on('progress', progHandler);
+
+        try {
+          showExportOverlay('Encoding GIF…', 'Generating palette…', 0.58);
+          await ffmpeg.exec([
+            '-framerate', String(fps),
+            '-i', 'frame%04d.png',
+            '-vf', `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen`,
+            'palette.png'
+          ]);
+
+          showExportOverlay('Encoding GIF…', 'Encoding GIF…', 0.75);
+          await ffmpeg.exec([
+            '-framerate', String(fps),
+            '-i', 'frame%04d.png',
+            '-i', 'palette.png',
+            '-lavfi', `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a`,
+            '-loop', '0',
+            'out.gif'
+          ]);
+        } finally {
+          ffmpeg.off('progress', progHandler);
+        }
+
+        showExportOverlay('Encoding GIF…', 'Finalizing…', 0.98);
+        const out = await ffmpeg.readFile('out.gif');
+        const blob = new Blob([out.buffer], { type: 'image/gif' });
+        downloadBlob(blob, `ncop-timeline-${orig.copView}.gif`);
+
+        showExportOverlay('Done', `Downloaded ncop-timeline-${orig.copView}.gif`, 1);
+        succeeded = true;
+        await sleep(400);
+      } catch (e) {
+        showExportOverlay('Export failed', (e && e.message) ? e.message : String(e), null);
+      } finally {
+        exportLayoutInstant = false;
+        // Restore UI + state
+        els.copView.value = orig.copView;
+        els.showNeutral.value = orig.showNeutral;
+        els.autoCop.checked = orig.autoCop;
+        els.autoRobber.checked = orig.autoRobber;
+        view.scale = orig.view.scale;
+        view.offsetX = orig.view.offsetX;
+        view.offsetY = orig.view.offsetY;
+        if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
+        gotoHistory(state, orig.historyIndex);
+        hoverEdge = null;
+        hoverNode = null;
+        layout = null;
+        forceNeedsRelax = true;
+        draw();
+
+        exportBusy = false;
+        if (succeeded) hideExportOverlay();
+        handleCopViewChange();
+      }
     }
 
     async function exportGifDemo() {
@@ -1671,6 +1806,13 @@
       }
 
       if (maxD < 0.5) {
+        layout.transition = null;
+        return;
+      }
+
+      if (exportLayoutInstant) {
+        // For exports, prefer deterministic + stable frames (no transition animation).
+        layout.nodes = to.map(p => ({ x: p.x, y: p.y }));
         layout.transition = null;
         return;
       }
@@ -3924,9 +4066,12 @@
     }
 
     if (els.exportGif) {
-      els.exportGif.addEventListener('click', async () => {
+      els.exportGif.addEventListener('click', async (ev) => {
         try {
-          await exportGifDemo();
+          // Default: export a move-timeline GIF for the current cop view.
+          // Hold Shift while clicking to export the old "cycle through views" demo.
+          if (ev && ev.shiftKey) await exportGifDemo();
+          else await exportGifMovesTimeline();
         } catch (e) {
           // errors are shown in the overlay
           console.error(e);
