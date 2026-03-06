@@ -1122,7 +1122,7 @@
     let exportFpsForAnim = null; // during exports: used to convert "N frames" -> ms
     function nowMs() { return (exportNowMs !== null) ? exportNowMs : performance.now(); }
 
-    const BLUE_FLASH_FRAMES_EXPORT = 12; // constant number of frames to show a deleted cop edge during exports
+    const BLUE_FLASH_FRAMES_EXPORT = 15; // constant number of frames to show a deleted cop edge during exports
 
     // Flash newly-blocked cop edges in deletions/robber views so the user can see what changed.
     // Map edgeKey -> { u, v, startMs, durMs }
@@ -1617,12 +1617,12 @@
           // We want node motion to be constant-speed (px/frame) across the whole extract.
           // Total duration should scale with (n * number_of_moves), but keep a hard cap to avoid
           // blowing up ffmpeg.wasm memory (we store all frames before encoding).
-          const FRAMES_PER_MOVE_PER_N = 12; // at 50fps => 0.24s per move when n=1
-          const HARD_MAX_TOTAL_FRAMES = 3200;
+          const FRAMES_PER_MOVE_PER_N = 24; // at 50fps => 0.48s per move when n=1 (slower / more breathing room)
+          const HARD_MAX_TOTAL_FRAMES = 9000;
 
           const desiredTransitionFrames = Math.max(0, (hlen - 1) * (state.n || 1) * FRAMES_PER_MOVE_PER_N);
           const fixedFrames = (hlen * holdFrames) + endHoldFrames;
-          const transitionBudget = clamp(desiredTransitionFrames, (hlen - 1) * 12, Math.max(0, HARD_MAX_TOTAL_FRAMES - fixedFrames));
+          const transitionBudget = clamp(desiredTransitionFrames, (hlen - 1) * 18, Math.max(0, HARD_MAX_TOTAL_FRAMES - fixedFrames));
 
           // Precompute converged layouts for every step.
           showExportOverlay('Preparing GIF export…', `Computing layouts (${hlen} steps)…`, 0);
