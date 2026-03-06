@@ -1674,7 +1674,7 @@
         if (orig.copView === 'blue') {
           // Pause briefly after each robber move so the viewer can register the position
           // before the next cop turn begins.
-          const ROBBER_SOAK_SECS = 0.10; // ~5 frames at 50fps
+          const ROBBER_SOAK_SECS = 0.20;
           const soakFrames = Math.max(1, Math.round(ROBBER_SOAK_SECS * fps));
 
           let robberSteps = 0;
@@ -1744,9 +1744,10 @@
           // Timing tweaks for exports:
           // - give cop edge deletions enough time to read individually
           // - keep robber merges from dominating the timeline
+          // - add a short "soak" after robber moves so the next cop turn doesn't feel instantaneous
           const HOLD_BASE = 1;                  // base pause per position
           const HOLD_EXTRA_PER_COP_EDGE = 10;   // extra pause after each newly-blocked cop edge
-          const HOLD_AFTER_ROBBER_TURN = 5;     // short soak after robber move before cop starts
+          const HOLD_AFTER_ROBBER_TURN = Math.max(3, Math.round(0.20 * fps)); // ~0.2s at current fps
           const COP_BLOCK_MIN_TRANS_FRAMES = 14;
           const MERGE_TRANS_FRAMES_MIN = 10;
           const MERGE_TRANS_FRAMES_MAX = 20;
