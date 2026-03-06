@@ -2810,10 +2810,38 @@
       return out;
     }
 
+    function parseCompoundLabelTokens(s) {
+      const toks = String(s).split('-').filter(t => t.length);
+      const out = [];
+      for (const t of toks) {
+        const n = Number(t);
+        if (!Number.isFinite(n)) return null;
+        out.push(n | 0);
+      }
+      return out;
+    }
+
+    function cmpCompoundLabels(a, b) {
+      // Numeric lexicographic order on "2-10-3" token sequences, so 2 < 10.
+      const ta = parseCompoundLabelTokens(a);
+      const tb = parseCompoundLabelTokens(b);
+      if (!ta || !tb) {
+        const sa = String(a), sb = String(b);
+        if (sa < sb) return -1;
+        if (sa > sb) return 1;
+        return 0;
+      }
+      const n = Math.min(ta.length, tb.length);
+      for (let i = 0; i < n; i++) {
+        if (ta[i] !== tb[i]) return ta[i] - tb[i];
+      }
+      return ta.length - tb.length;
+    }
+
     function computeContractLabelsByMergeOrder(state, comps) {
       // Labels are derived by replaying robber edges in chronological order.
-      // When merging components with labels A and B, the new label becomes min(A,B)+"-"+max(A,B)
-      // where min/max are lexicographic on the whole compound label.
+      // When merging components with labels A and B, the new label becomes A-B or B-A,
+      // ordered by numeric lexicographic ordering of the whole compound label.
       const k = state.k | 0;
       const parent = new Array(k);
       const size = new Array(k);
@@ -2829,8 +2857,9 @@
         if (ra === rb) return;
         const la = label[ra];
         const lb = label[rb];
-        const first = (la <= lb) ? la : lb;
-        const second = (la <= lb) ? lb : la;
+        const cmp = cmpCompoundLabels(la, lb);
+        const first = (cmp <= 0) ? la : lb;
+        const second = (cmp <= 0) ? lb : la;
         const merged = `${first}-${second}`;
         // union by size
         if (size[ra] < size[rb]) { const t = ra; ra = rb; rb = t; }
@@ -2880,7 +2909,7 @@
     function contractPairKeyFromLabels(la, lb) {
       const a = String(la);
       const b = String(lb);
-      return (a < b) ? `${a}|${b}` : `${b}|${a}`;
+      return (cmpCompoundLabels(a, b) <= 0) ? `${a}|${b}` : `${b}|${a}`;
     }
 
     function updateContractCountAnims(cv) {
@@ -2912,6 +2941,113 @@
       }
 
       contractPrevCounts = cur;
+    }
+
+    function computeContractCurveForPair(cv, a, b) {
+      // Compute a curve for an arbitrary component pair (even if there is no neutral edge left).
+      const m = cv.comps.length;
+      if (a < 0 || b < 0 || a >= m || b >= m || a === b) return null;
+
+      const A = cv.centers[a];
+      const B = cv.centers[b];
+      const dx = B.x - A.x;
+      const dy = B.y - A.y;
+      const len = Math.hypot(dx, dy) + 0.001;
+      const px = -dy / len;
+      const py = dx / len;
+
+      // Compute a base offset by inserting this pair into each endpoint's angular ordering.
+      function baseOffAt(v, other) {
+        const items = [];
+        const V = cv.centers[v];
+        for (let ei = 0; ei < cv.edges.length; ei++) {
+          const e = cv.edges[ei];
+          const u = (e.a === v) ? e.b : (e.b === v) ? e.a : -1;
+          if (u < 0) continue;
+          const U = cv.centers[u];
+          items.push({ ang: Math.atan2(U.y - V.y, U.x - V.x), self: false });
+        }
+        const O = cv.centers[other];
+        items.push({ ang: Math.atan2(O.y - V.y, O.x - V.x), self: true });
+        items.sort((p, q) => p.ang - q.ang);
+        const d = items.length;
+        const mid = (d - 1) * 0.5;
+        const idx = items.findIndex(it => it.self);
+        return (idx >= 0) ? (idx - mid) : 0;
+      }
+
+      let baseOff = baseOffAt(a, b) - baseOffAt(b, a);
+
+      // radii incl. label fit
+      const rad = new Array(m);
+      for (let i = 0; i < m; i++) {
+        const sz = cv.sizes[i] || 1;
+        const label = cv.labels[i] || '';
+        const fs = contractLabelFontPx(label);
+        const rLabel = contractMinRadiusForLabel(label, fs, 12);
+        rad[i] = Math.max(contractNodeRadius(sz), rLabel);
+      }
+
+      function obstaclePenalty(C) {
+        if (m <= 2) return 0;
+        const margin = 12;
+        let pen = 0;
+        const S = 10;
+        for (let j = 0; j < m; j++) {
+          if (j === a || j === b) continue;
+          const R = rad[j] + margin;
+          const O = cv.centers[j];
+          let minD = Infinity;
+          for (let si = 0; si <= S; si++) {
+            const t = 0.10 + 0.80 * (si / S);
+            const p = quadAt(A, C, B, t);
+            const d = Math.hypot(p.x - O.x, p.y - O.y);
+            if (d < minD) minD = d;
+          }
+          if (minD < R) {
+            const x = (R - minD);
+            pen += x * x;
+          }
+        }
+        return pen;
+      }
+
+      const rA = rad[a];
+      const rB = rad[b];
+      const BASE = 10 + 0.55 * (rA + rB);
+      const maxOffByLen = Math.max(0.0, Math.min(4.6, (len * 0.35) / Math.max(1, BASE)));
+      baseOff = clamp(baseOff, -maxOffByLen, maxOffByLen);
+
+      const mx = (A.x + B.x) * 0.5;
+      const my = (A.y + B.y) * 0.5;
+
+      const cand = [];
+      const deltas = [0, 0.85, 1.65, 2.45, 3.25];
+      for (const d of deltas) { cand.push(baseOff + d); cand.push(baseOff - d); }
+      if (Math.abs(baseOff) > 0.001) { cand.push(-baseOff); cand.push(-baseOff * 1.4); }
+      else { cand.push(0); cand.push(1.0); cand.push(-1.0); cand.push(1.8); cand.push(-1.8); }
+
+      let bestOff = baseOff;
+      let bestPen = Infinity;
+      const seen = new Set();
+      for (let ci = 0; ci < cand.length; ci++) {
+        let off = clamp(cand[ci], -maxOffByLen, maxOffByLen);
+        const key = Math.round(off * 1000);
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const C = { x: mx + px * BASE * off, y: my + py * BASE * off };
+        let pen = obstaclePenalty(C) * 140;
+        const d0 = (off - baseOff);
+        pen += d0 * d0 * 35;
+        pen += (Math.abs(off) * 6) * (Math.abs(off) * 6);
+        if (pen < bestPen) { bestPen = pen; bestOff = off; }
+        if (bestPen < 1e-3) break;
+      }
+
+      const C = { x: mx + px * BASE * bestOff, y: my + py * BASE * bestOff };
+      const midP = quadAt(A, C, B, 0.5);
+      return { A, B, C, mid: midP, len };
     }
 
     function computeContractEdgeCurves(cv) {
@@ -3505,7 +3641,7 @@
 
               const rP = contractNodeRadius(cvFrom.sizes[a] || 1) * sFrom;
               const rQ = contractNodeRadius(cvFrom.sizes[b] || 1) * sFrom;
-              const sign = (String(cvFrom.labels[a]) < String(cvFrom.labels[b])) ? 1 : -1;
+              const sign = (cmpCompoundLabels(String(cvFrom.labels[a]), String(cvFrom.labels[b])) <= 0) ? 1 : -1;
               const amp = sign * (18 + 0.30 * (rP + rQ));
               const mx = (P.x + Q.x) * 0.5;
               const my = (P.y + Q.y) * 0.5;
@@ -3540,26 +3676,38 @@
           renderContract(cvMain, 1, true);
         }
 
-        // Flash newly-blocked cop edges: draw between component centers (always on top, non-crossfaded).
+        // Flash newly-blocked cop edges: draw curved to match contract-view edge routing (always on top).
         if (blueFlash.size) {
           const t = nowMs();
+          const curves = computeContractEdgeCurves(cvMain);
           ctx.save();
           ctx.strokeStyle = blueCol;
           ctx.lineWidth = 7;
           ctx.lineCap = 'round';
           for (const [_, f] of blueFlash) {
-            const ca = cvMain.compOf[f.u];
-            const cb = cvMain.compOf[f.v];
+            let ca = cvMain.compOf[f.u];
+            let cb = cvMain.compOf[f.v];
             if (ca < 0 || cb < 0 || ca === cb) continue;
+            const a = Math.min(ca, cb);
+            const b = Math.max(ca, cb);
+
             const age = t - f.startMs;
             if (age < 0) continue;
             const tt = Math.max(0, Math.min(1, age / Math.max(1, f.durMs)));
             ctx.globalAlpha = Math.max(0, 1 - tt);
-            const A = cvMain.centers[ca];
-            const B = cvMain.centers[cb];
+
+            // Prefer using the same curve as the surviving neutral super-edge, if it still exists.
+            let c = null;
+            for (let ei = 0; ei < cvMain.edges.length; ei++) {
+              const e = cvMain.edges[ei];
+              if (e.a === a && e.b === b) { c = curves[ei]; break; }
+            }
+            if (!c) c = computeContractCurveForPair(cvMain, a, b);
+            if (!c) continue;
+
             ctx.beginPath();
-            ctx.moveTo(A.x, A.y);
-            ctx.lineTo(B.x, B.y);
+            ctx.moveTo(c.A.x, c.A.y);
+            ctx.quadraticCurveTo(c.C.x, c.C.y, c.B.x, c.B.y);
             ctx.stroke();
           }
           ctx.restore();
