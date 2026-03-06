@@ -2706,22 +2706,24 @@
         function renderContract(cv, alpha, withHover) {
           if (alpha <= 0.001) return;
 
+          // We'll render pills *after* hover highlights so dashed lines appear under the pill.
+          const pills = [];
+          const labelFill = bgFill ? bgFill : (bgMode === 'transparent' ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,0.65)');
+          const labelFg = (bgMode === 'light') ? 'rgba(0,0,0,0.88)' : 'rgba(255,255,255,0.92)';
+
+          function roundedRectPath(x, y, w, h, r) {
+            const rr = Math.max(0, Math.min(r, Math.min(w, h) * 0.5));
+            ctx.beginPath();
+            ctx.moveTo(x + rr, y);
+            ctx.arcTo(x + w, y, x + w, y + h, rr);
+            ctx.arcTo(x + w, y + h, x, y + h, rr);
+            ctx.arcTo(x, y + h, x, y, rr);
+            ctx.arcTo(x, y, x + w, y, rr);
+            ctx.closePath();
+          }
+
           // Neutral parallel edges (+ embedded multiplicity labels)
           if (showNeutral) {
-            const labelFill = bgFill ? bgFill : (bgMode === 'transparent' ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,0.65)');
-            const labelFg = (bgMode === 'light') ? 'rgba(0,0,0,0.88)' : 'rgba(255,255,255,0.92)';
-
-            function roundedRectPath(x, y, w, h, r) {
-              const rr = Math.max(0, Math.min(r, Math.min(w, h) * 0.5));
-              ctx.beginPath();
-              ctx.moveTo(x + rr, y);
-              ctx.arcTo(x + w, y, x + w, y + h, rr);
-              ctx.arcTo(x + w, y + h, x, y + h, rr);
-              ctx.arcTo(x, y + h, x, y, rr);
-              ctx.arcTo(x, y, x + w, y, rr);
-              ctx.closePath();
-            }
-
             ctx.save();
             ctx.strokeStyle = neutralCol;
             ctx.lineCap = 'round';
@@ -2800,35 +2802,8 @@
               if (cnt > 1) {
                 const mx = (A.x + B.x) * 0.5;
                 const my = (A.y + B.y) * 0.5;
-
-                // Keep pills horizontally oriented so the number is always readable.
-                ctx.save();
-                ctx.translate(mx, my);
-                ctx.globalAlpha = alpha * (hot ? 1.0 : 0.92);
-
-                roundedRectPath(-pillW / 2, -pillH / 2, pillW, pillH, pillH / 2);
-                ctx.fillStyle = labelFill;
-                ctx.fill();
-
-                if (glowCol) {
-                  ctx.save();
-                  ctx.shadowColor = glowCol;
-                  ctx.shadowBlur = hotEdge ? 24 : 18;
-                  ctx.strokeStyle = glowCol;
-                  ctx.lineWidth = 6;
-                  roundedRectPath(-pillW / 2, -pillH / 2, pillW, pillH, pillH / 2);
-                  ctx.stroke();
-                  ctx.restore();
-                }
-
-                ctx.strokeStyle = neutralCol;
-                ctx.lineWidth = 3.2;
-                roundedRectPath(-pillW / 2, -pillH / 2, pillW, pillH, pillH / 2);
-                ctx.stroke();
-
-                ctx.fillStyle = labelFg;
-                ctx.fillText(text, 0, 1.0);
-                ctx.restore();
+                const fontPx = hot ? 24 : 20;
+                pills.push({ mx, my, pillW, pillH, text, alpha, hot, hotEdge, glowCol, fontPx });
               }
             }
 
@@ -2871,6 +2846,44 @@
             ctx.lineTo(B.x, B.y);
             ctx.stroke();
             ctx.setLineDash([]);
+            ctx.restore();
+          }
+
+          // Draw multiplicity pills last so hover highlights/dashes run under them.
+          if (showNeutral && pills.length) {
+            ctx.save();
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            for (const p of pills) {
+              ctx.save();
+              ctx.translate(p.mx, p.my);
+              ctx.globalAlpha = p.alpha * (p.hot ? 1.0 : 0.92);
+              ctx.font = `900 ${p.fontPx}px ui-sans-serif, system-ui`;
+
+              roundedRectPath(-p.pillW / 2, -p.pillH / 2, p.pillW, p.pillH, p.pillH / 2);
+              ctx.fillStyle = labelFill;
+              ctx.fill();
+
+              if (p.glowCol) {
+                ctx.save();
+                ctx.shadowColor = p.glowCol;
+                ctx.shadowBlur = p.hotEdge ? 24 : 18;
+                ctx.strokeStyle = p.glowCol;
+                ctx.lineWidth = 6;
+                roundedRectPath(-p.pillW / 2, -p.pillH / 2, p.pillW, p.pillH, p.pillH / 2);
+                ctx.stroke();
+                ctx.restore();
+              }
+
+              ctx.strokeStyle = neutralCol;
+              ctx.lineWidth = 3.2;
+              roundedRectPath(-p.pillW / 2, -p.pillH / 2, p.pillW, p.pillH, p.pillH / 2);
+              ctx.stroke();
+
+              ctx.fillStyle = labelFg;
+              ctx.fillText(p.text, 0, 1.0);
+              ctx.restore();
+            }
             ctx.restore();
           }
 
