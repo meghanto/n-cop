@@ -722,7 +722,7 @@
       } else {
         // Contract-view merge animation: capture the pre-move red components.
         if (els.copView && els.copView.value === 'contract') {
-          pendingContractFrom = computeRedComponents(state);
+          pendingContractFrom = computeContractPartition(state);
         } else {
           pendingContractFrom = null;
         }
@@ -1674,7 +1674,7 @@
             gotoHistory(state, i);
             layout = { k, mode: 'force', nodes: computeCircleNodes(k), edges, transition: null };
             pos[i] = computeDeletionViewLayoutFromRing();
-            if (part) part[i] = computeRedComponents(state);
+            if (part) part[i] = computeContractPartition(state);
             if (i % 2 === 0) {
               showExportOverlay('Preparing GIF export…', `Computing layouts (${i + 1}/${hlen})…`, (i + 1) / hlen * 0.20);
               await sleep(0);
@@ -2407,7 +2407,7 @@
       const copView = (els.copView && els.copView.value) ? els.copView.value : 'blue';
       let contractAnim = null;
       if (copView === 'contract' && pendingContractFrom) {
-        const after = computeRedComponents(state);
+        const after = computeContractPartition(state);
         const beforeCount = pendingContractFrom.comps ? pendingContractFrom.comps.length : 0;
         const afterCount = after.comps ? after.comps.length : 0;
         if (afterCount > 0 && beforeCount > 0 && afterCount < beforeCount) {
@@ -2747,9 +2747,10 @@
       return Math.hypot(tw * 0.5, th * 0.5) + pad;
     }
 
-    function buildContractViewDataFromPartition(nodes, comps, compOf) {
+    function buildContractViewDataFromPartition(nodes, comps, compOf, labelsIn = null) {
       // nodes: per-vertex positions (k entries).
       // comps/compOf: a partition of vertices into contracted nodes.
+      // labelsIn: optional labels per component index (merge-history labels).
       const m = comps.length;
 
       const centers = new Array(m);
@@ -2761,7 +2762,7 @@
       for (let ci = 0; ci < m; ci++) {
         const verts = comps[ci];
         sizes[ci] = verts.length;
-        labels[ci] = verts.join('-');
+        labels[ci] = (labelsIn && labelsIn[ci] !== undefined && labelsIn[ci] !== null) ? String(labelsIn[ci]) : verts.join('-');
         let sx = 0, sy = 0;
         for (const v of verts) {
           sx += nodes[v].x;
@@ -2794,10 +2795,86 @@
       return { comps, compOf, centers, labels, sizes, has0, has1, edges };
     }
 
+    function redEdgesInOrderFromRounds(rounds) {
+      const out = [];
+      const rs = rounds || [];
+      for (const r of rs) {
+        if (!r || !r.robber) continue;
+        let u = r.robber.u, v = r.robber.v;
+        if (!Number.isFinite(u) || !Number.isFinite(v)) continue;
+        u |= 0; v |= 0;
+        if (u === v) continue;
+        if (u > v) { const t = u; u = v; v = t; }
+        out.push({ u, v });
+      }
+      return out;
+    }
+
+    function computeContractLabelsByMergeOrder(state, comps) {
+      // Labels are derived by replaying robber edges in chronological order.
+      // When merging components with labels A and B, the new label becomes min(A,B)+"-"+max(A,B)
+      // where min/max are lexicographic on the whole compound label.
+      const k = state.k | 0;
+      const parent = new Array(k);
+      const size = new Array(k);
+      const label = new Array(k);
+      for (let i = 0; i < k; i++) { parent[i] = i; size[i] = 1; label[i] = String(i); }
+
+      function find(x) {
+        while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+        return x;
+      }
+      function unite(a, b) {
+        let ra = find(a), rb = find(b);
+        if (ra === rb) return;
+        const la = label[ra];
+        const lb = label[rb];
+        const first = (la <= lb) ? la : lb;
+        const second = (la <= lb) ? lb : la;
+        const merged = `${first}-${second}`;
+        // union by size
+        if (size[ra] < size[rb]) { const t = ra; ra = rb; rb = t; }
+        parent[rb] = ra;
+        size[ra] += size[rb];
+        label[ra] = merged;
+      }
+
+      // Preferred: use moveRounds (has exact robber edge order).
+      let edges = [];
+      if (state.moveRounds && state.moveRounds.length) edges = redEdgesInOrderFromRounds(state.moveRounds);
+
+      // Fallback: if we somehow have red edges but no move list, we can't infer order.
+      // In that case, we keep the old sorted-vertex label.
+      if ((!edges || !edges.length) && state.red && state.red.size) {
+        return comps.map(verts => verts.slice().sort((a, b) => a - b).join('-'));
+      }
+
+      // Replay robber edges (ignore any edge not present in the current state's red set).
+      for (const e of edges) {
+        const key = edgeKey(e.u, e.v);
+        if (state.red && !state.red.has(key)) continue;
+        unite(e.u, e.v);
+      }
+
+      const labels = new Array(comps.length);
+      for (let ci = 0; ci < comps.length; ci++) {
+        const verts = comps[ci];
+        const v0 = (verts && verts.length) ? verts[0] : ci;
+        labels[ci] = label[find(v0)];
+      }
+      return labels;
+    }
+
+    function computeContractPartition(state) {
+      const { comps, compOf } = computeRedComponents(state);
+      const labels = computeContractLabelsByMergeOrder(state, comps);
+      return { comps, compOf, labels };
+    }
+
     function buildContractViewData(nodes) {
       // We compute red components and treat each as a merged node.
-      const { comps, compOf } = computeRedComponents(state);
-      return buildContractViewDataFromPartition(nodes, comps, compOf);
+      const p = computeContractPartition(state);
+      return buildContractViewDataFromPartition(nodes, p.comps, p.compOf, p.labels);
     }
 
     function contractPairKeyFromLabels(la, lb) {
@@ -3072,8 +3149,8 @@
           const fromP = tr.contractAnim.from;
           const toP = tr.contractAnim.to;
           mergePairs = computeMergePairs(fromP, toP);
-          cvFrom = buildContractViewDataFromPartition(nodes, fromP.comps, fromP.compOf);
-          cvMain = buildContractViewDataFromPartition(nodes, toP.comps, toP.compOf);
+          cvFrom = buildContractViewDataFromPartition(nodes, fromP.comps, fromP.compOf, fromP.labels || null);
+          cvMain = buildContractViewDataFromPartition(nodes, toP.comps, toP.compOf, toP.labels || null);
         }
 
         let hoverEdgeComps = null;
