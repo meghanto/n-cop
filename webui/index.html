@@ -376,6 +376,7 @@
             <option value="blue" selected>Show as blue edges</option>
             <option value="delete">Deletions layout (hide blue)</option>
             <option value="robber">Robber-attraction layout (hide blue)</option>
+            <option value="contract">Robber-contraction layout (hide blue; contract red)</option>
           </select>
         </div>
         <div>
@@ -728,8 +729,8 @@
           if (!state.moveRounds || !state.moveRounds.length) state.moveRounds = [{ cop: [], robber: null }];
           state.moveRounds.push({ cop: [], robber: null });
         }
-        // In robber-attraction layout, robber edges affect the layout.
-        if (els.copView && els.copView.value === 'robber') forceNeedsRelax = true;
+        // In robber-attraction / contraction layouts, robber edges affect the layout.
+        if (els.copView && (els.copView.value === 'robber' || els.copView.value === 'contract')) forceNeedsRelax = true;
         pushHistory(state);
         return { ok: true };
       }
@@ -757,7 +758,7 @@
       if (els.copView) {
         const v = els.copView.value;
         if (v === 'delete' && state.blue.size !== blueBeforeSet.size) forceNeedsRelax = true;
-        if (v === 'robber' && (state.blue.size !== blueBeforeSet.size || state.red.size !== redBefore)) forceNeedsRelax = true;
+        if ((v === 'robber' || v === 'contract') && (state.blue.size !== blueBeforeSet.size || state.red.size !== redBefore)) forceNeedsRelax = true;
       }
     }
 
@@ -2082,17 +2083,94 @@
       const ring = computeCircleNodes(k);
       const masks = remainingNeighborMasks();
 
+      const v = (els.copView && els.copView.value) ? els.copView.value : 'delete';
+      if (v === 'contract') return computeContractViewLayoutFromRing(ring, masks);
+
       let redEdges = null;
-      if (els.copView && els.copView.value === 'robber') {
+      if (v === 'robber') {
         redEdges = [];
         for (const key of state.red) {
-          const [u, v] = parseEdgeKey(key);
+          const [u, v2] = parseEdgeKey(key);
           // should always be remaining, but keep it robust
-          if (((masks[u] >>> v) & 1) && ((masks[v] >>> u) & 1)) redEdges.push([u, v]);
+          if (((masks[u] >>> v2) & 1) && ((masks[v2] >>> u) & 1)) redEdges.push([u, v2]);
         }
       }
 
       return convergeForceLayout(ring, masks, ring, redEdges);
+    }
+
+    function computeContractViewLayoutFromRing(ring, masks) {
+      // Robber-contraction view:
+      // - blue edges hidden (same remaining-edge basis as deletions view)
+      // - red components are "contracted" (drawn as tight clusters)
+      // We compute a force layout on the *component quotient graph*, then place vertices
+      // of each red component on a small deterministic mini-ring around the component center.
+      const k = layout.k;
+      const { comps, compOf } = computeRedComponents(state);
+      const m = comps.length;
+      if (m <= 0) return ring;
+
+      // Component sizes and blocked edge counts between components.
+      const sizes = comps.map(c => c.length);
+      const blocked = Array.from({ length: m }, () => new Array(m).fill(0));
+      for (const key of state.blue) {
+        const [u, v] = parseEdgeKey(key);
+        const cu = compOf[u], cv = compOf[v];
+        if (cu >= 0 && cv >= 0 && cu !== cv) {
+          blocked[cu][cv]++;
+          blocked[cv][cu]++;
+        }
+      }
+
+      // Initial component centers: average ring positions of member vertices.
+      const centers0 = new Array(m);
+      for (let ci = 0; ci < m; ci++) {
+        const verts = comps[ci];
+        let sx = 0, sy = 0;
+        for (const v of verts) { sx += ring[v].x; sy += ring[v].y; }
+        const inv = 1 / Math.max(1, verts.length);
+        centers0[ci] = { x: sx * inv, y: sy * inv };
+      }
+
+      // Weighted springs between components based on how many unblocked edges remain between them.
+      // weight=1 => fully connected (no deletions), weight=0 => fully deleted between comps.
+      const edgesW = [];
+      for (let i = 0; i < m; i++) {
+        for (let j = i + 1; j < m; j++) {
+          const possible = sizes[i] * sizes[j];
+          const rem = possible - blocked[i][j];
+          const w = (possible > 0) ? Math.max(0, Math.min(1, rem / possible)) : 0;
+          if (w <= 0) continue;
+          edgesW.push({ u: i, v: j, w });
+        }
+      }
+
+      const compCenters = convergeForceLayoutWeighted(m, centers0, edgesW, centers0, {
+        springK: 0.016,
+        damping: 0.82,
+      });
+
+      // Place the original vertices around their component center (deterministic).
+      const out = new Array(k);
+      for (let ci = 0; ci < m; ci++) {
+        const verts = comps[ci];
+        const c = compCenters[ci];
+        const s = verts.length;
+        if (s <= 1) {
+          out[verts[0]] = { x: c.x, y: c.y };
+          continue;
+        }
+        const r = 10 + 6 * Math.sqrt(s);
+        for (let idx = 0; idx < s; idx++) {
+          const v = verts[idx];
+          const a = (-Math.PI / 2) + (idx * 2 * Math.PI / s);
+          out[v] = { x: c.x + Math.cos(a) * r, y: c.y + Math.sin(a) * r };
+        }
+      }
+
+      // Any missing (shouldn't happen) fall back to ring.
+      for (let v = 0; v < k; v++) if (!out[v]) out[v] = { x: ring[v].x, y: ring[v].y };
+      return out;
     }
 
     function convergeForceLayout(startNodes, masks, restRefNodes, redEdges) {
@@ -2333,6 +2411,105 @@
       } else {
         forceAnimRunning = false;
       }
+    }
+
+    function convergeForceLayoutWeighted(k, startNodes, edgesW, restRefNodes, opts = {}) {
+      const nodes = startNodes.map(p => ({ x: p.x, y: p.y }));
+
+      const w = els.canvas.width;
+      const h = els.canvas.height;
+      const cx = w * 0.5;
+      const cy = h * 0.5;
+      const padding = 28;
+
+      const area = w * h;
+      const ideal = Math.sqrt(area / Math.max(1, k)) * 0.90;
+
+      const repelK = ideal * ideal * 0.85;
+      const springK = (opts.springK !== undefined) ? opts.springK : 0.012;
+      const gravityK = (opts.gravityK !== undefined) ? opts.gravityK : 0.0006;
+      const damping = (opts.damping !== undefined) ? opts.damping : 0.82;
+      const maxSpeed = (opts.maxSpeed !== undefined) ? opts.maxSpeed : 16;
+
+      const vx = new Array(k).fill(0);
+      const vy = new Array(k).fill(0);
+
+      for (let iter = 0; iter < 1400; iter++) {
+        const fx = new Array(k).fill(0);
+        const fy = new Array(k).fill(0);
+
+        // Vertex repulsion
+        for (let i = 0; i < k; i++) {
+          for (let j = i + 1; j < k; j++) {
+            let dx = nodes[i].x - nodes[j].x;
+            let dy = nodes[i].y - nodes[j].y;
+            const dist = Math.hypot(dx, dy) + 0.01;
+            const f = repelK / (dist * dist);
+            dx /= dist;
+            dy /= dist;
+            fx[i] += dx * f;
+            fy[i] += dy * f;
+            fx[j] -= dx * f;
+            fy[j] -= dy * f;
+          }
+        }
+
+        // Weighted springs
+        for (const e of edgesW) {
+          const u = e.u, v = e.v;
+          let dx = nodes[u].x - nodes[v].x;
+          let dy = nodes[u].y - nodes[v].y;
+          const dist = Math.hypot(dx, dy) + 0.01;
+          dx /= dist;
+          dy /= dist;
+
+          const rest = Math.hypot(restRefNodes[u].x - restRefNodes[v].x,
+                                 restRefNodes[u].y - restRefNodes[v].y);
+          const stretch = dist - rest;
+          const f = springK * (e.w || 1) * stretch;
+
+          fx[u] -= dx * f;
+          fy[u] -= dy * f;
+          fx[v] += dx * f;
+          fy[v] += dy * f;
+        }
+
+        // Gentle gravity to the center
+        for (let i = 0; i < k; i++) {
+          fx[i] += (cx - nodes[i].x) * gravityK;
+          fy[i] += (cy - nodes[i].y) * gravityK;
+        }
+
+        // Integrate
+        let avgSpeed = 0;
+        for (let i = 0; i < k; i++) {
+          vx[i] = (vx[i] + fx[i]) * damping;
+          vy[i] = (vy[i] + fy[i]) * damping;
+
+          let sp = Math.hypot(vx[i], vy[i]);
+          if (sp > maxSpeed) {
+            const s = maxSpeed / sp;
+            vx[i] *= s;
+            vy[i] *= s;
+            sp = maxSpeed;
+          }
+
+          nodes[i].x += vx[i];
+          nodes[i].y += vy[i];
+
+          if (nodes[i].x < padding) { nodes[i].x = padding; vx[i] *= -0.35; }
+          if (nodes[i].x > w - padding) { nodes[i].x = w - padding; vx[i] *= -0.35; }
+          if (nodes[i].y < padding) { nodes[i].y = padding; vy[i] *= -0.35; }
+          if (nodes[i].y > h - padding) { nodes[i].y = h - padding; vy[i] *= -0.35; }
+
+          avgSpeed += sp;
+        }
+
+        avgSpeed /= Math.max(1, k);
+        if (iter > 60 && avgSpeed < 0.06) break;
+      }
+
+      return nodes;
     }
 
     function distToSegment(px, py, x1, y1, x2, y2) {
@@ -2935,6 +3112,7 @@
         const v = (els.copView && els.copView.value) ? els.copView.value : 'blue';
         if (v === 'delete') els.copLegend.textContent = 'Cop (deletions — hidden in this view)';
         else if (v === 'robber') els.copLegend.textContent = 'Cop (deletions — hidden; robber-attraction layout)';
+        else if (v === 'contract') els.copLegend.textContent = 'Cop (deletions — hidden; robber edges contracted)';
         else els.copLegend.textContent = 'Cop (blocked edge)';
       }
 
@@ -4491,7 +4669,7 @@
     if (els.bgMode) els.bgMode.addEventListener('change', draw);
     els.copView.addEventListener('change', handleCopViewChange);
     els.toggleCopView.addEventListener('click', () => {
-      const order = ['blue', 'delete', 'robber'];
+      const order = ['blue', 'delete', 'robber', 'contract'];
       const cur = els.copView.value || 'blue';
       const idx = Math.max(0, order.indexOf(cur));
       els.copView.value = order[(idx + 1) % order.length];
