@@ -2362,9 +2362,9 @@
 
       // Smoothly transition to the new converged layout.
       let durMs = Math.max(700, Math.min(2800, 700 + maxD * 5.0));
-      // Give robber-contraction merges a bit more time to "breathe".
+      // Robber-contraction merges should feel like a *collision*: faster and more decisive.
       if (contractAnim) {
-        durMs = Math.min(4800, Math.max(durMs, 1400) * 1.25);
+        durMs = Math.max(420, Math.min(1250, 420 + maxD * 2.2));
       }
       layout.transition = {
         from,
@@ -2417,8 +2417,17 @@
 
       const tr = layout.transition;
       const t = Math.max(0, Math.min(1, (ts - tr.startMs) / tr.durMs));
-      // smoothstep easing
-      const e = t * t * (3 - 2 * t);
+
+      // Easing: normal transitions use smoothstep; robber-merge transitions accelerate into a collision.
+      let e;
+      if (tr.contractAnim) {
+        // Start moving immediately, then accelerate strongly near the end.
+        // e'(0)=0.30, e'(1)=2.40
+        e = t * (0.30 + 0.70 * t * t);
+      } else {
+        // smoothstep easing
+        e = t * t * (3 - 2 * t);
+      }
 
       for (let i = 0; i < layout.k; i++) {
         layout.nodes[i].x = tr.from[i].x + (tr.to[i].x - tr.from[i].x) * e;
@@ -2736,7 +2745,8 @@
 
     function computeContractEdgeCurves(cv) {
       // Compute deterministic quadratic-curve control points for all super-edges.
-      // This reduces overlap/collinearity ambiguity (e.g., A-B and A-C looking like B-C).
+      // This reduces overlap/collinearity ambiguity (e.g., A-B and A-C looking like B-C)
+      // and also tries to avoid routing edges through unrelated nodes.
       const m = cv.comps.length;
       const inc = Array.from({ length: m }, () => []); // per node: { ei, ang }
 
@@ -2758,8 +2768,34 @@
         }
       }
 
-      const MAX_OFF = 2.8;
       const curves = new Array(cv.edges.length);
+      const rad = new Array(m);
+      for (let i = 0; i < m; i++) rad[i] = contractNodeRadius(cv.sizes[i] || 1);
+
+      function obstaclePenalty(A, C, B, a, b) {
+        if (m <= 2) return 0;
+        const margin = 12;
+        let pen = 0;
+        const S = 10;
+        for (let j = 0; j < m; j++) {
+          if (j === a || j === b) continue;
+          const R = rad[j] + margin;
+          const O = cv.centers[j];
+          let minD = Infinity;
+          for (let si = 0; si <= S; si++) {
+            const t = 0.10 + 0.80 * (si / S);
+            const p = quadAt(A, C, B, t);
+            const d = Math.hypot(p.x - O.x, p.y - O.y);
+            if (d < minD) minD = d;
+          }
+          if (minD < R) {
+            const x = (R - minD);
+            pen += x * x;
+          }
+        }
+        return pen;
+      }
+
       for (let ei = 0; ei < cv.edges.length; ei++) {
         const e = cv.edges[ei];
         const A = cv.centers[e.a];
@@ -2772,17 +2808,66 @@
 
         const oa = offAt[e.a][ei] ?? 0;
         const ob = offAt[e.b][ei] ?? 0;
-        let off = oa - ob;
-        if (inc[e.a].length <= 1 && inc[e.b].length <= 1) off = 0;
-        off = clamp(off, -MAX_OFF, MAX_OFF);
+        let baseOff = oa - ob;
+        if (inc[e.a].length <= 1 && inc[e.b].length <= 1) baseOff = 0;
 
-        const rA = contractNodeRadius(cv.sizes[e.a] || 1);
-        const rB = contractNodeRadius(cv.sizes[e.b] || 1);
+        const rA = rad[e.a];
+        const rB = rad[e.b];
         const BASE = 10 + 0.55 * (rA + rB);
+
+        // Limit curvature based on edge length so we don't create crazy loops.
+        const maxOffByLen = Math.max(0.0, Math.min(4.6, (len * 0.35) / Math.max(1, BASE)));
+
+        // Candidate offsets around baseOff, plus sign-flips to route around obstacles.
+        const cand = [];
+        const deltas = [0, 0.85, 1.65, 2.45, 3.25];
+        for (const d of deltas) {
+          cand.push(baseOff + d);
+          cand.push(baseOff - d);
+        }
+        if (Math.abs(baseOff) > 0.001) {
+          cand.push(-baseOff);
+          cand.push(-baseOff * 1.4);
+        } else {
+          cand.push(0);
+          cand.push(1.0);
+          cand.push(-1.0);
+          cand.push(1.8);
+          cand.push(-1.8);
+        }
+
+        let bestOff = clamp(baseOff, -maxOffByLen, maxOffByLen);
+        let bestPen = Infinity;
 
         const mx = (A.x + B.x) * 0.5;
         const my = (A.y + B.y) * 0.5;
-        const C = { x: mx + px * BASE * off, y: my + py * BASE * off };
+
+        const seen = new Set();
+        for (let ci = 0; ci < cand.length; ci++) {
+          let off = clamp(cand[ci], -maxOffByLen, maxOffByLen);
+          const key = Math.round(off * 1000);
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          const C = { x: mx + px * BASE * off, y: my + py * BASE * off };
+          let pen = obstaclePenalty(A, C, B, e.a, e.b) * 140;
+
+          // Prefer staying close to the deterministic base offset.
+          const d0 = (off - clamp(baseOff, -maxOffByLen, maxOffByLen));
+          pen += d0 * d0 * 35;
+          // Mildly prefer less curvature.
+          pen += (Math.abs(off) * 6) * (Math.abs(off) * 6);
+
+          if (pen < bestPen) {
+            bestPen = pen;
+            bestOff = off;
+          }
+
+          // Early exit if we're very clean.
+          if (bestPen < 1e-3) break;
+        }
+
+        const C = { x: mx + px * BASE * bestOff, y: my + py * BASE * bestOff };
         const midP = quadAt(A, C, B, 0.5);
         curves[ei] = { A, B, C, mid: midP, len };
       }
@@ -2881,9 +2966,12 @@
         if (layout && layout.transition && layout.transition.contractAnim) {
           const tr = layout.transition;
           const t = clamp((nowMs() - tr.startMs) / Math.max(1, tr.durMs), 0, 1);
-          // Only start the "merge" sizing in the final part so you see the collision first.
-          mergeT = smoothstep(clamp((t - 0.72) / 0.28, 0, 1));
-          metaballT = smoothstep(clamp((t - 0.52) / 0.48, 0, 1));
+          // Merge sizing and metaballs: start earlier now that the overall transition is faster,
+          // and ease-in so it accelerates as nodes get close.
+          const uMerge = clamp((t - 0.58) / 0.42, 0, 1);
+          mergeT = uMerge * uMerge; // ease-in
+          const uMb = clamp((t - 0.40) / 0.60, 0, 1);
+          metaballT = uMb * uMb;
           const fromP = tr.contractAnim.from;
           const toP = tr.contractAnim.to;
           mergePairs = computeMergePairs(fromP, toP);
@@ -2927,6 +3015,11 @@
           const metaballs = opts.metaballs || null; // [{a,b}] in this cv's component indices
           const metaballTLocal = (opts.metaballT !== undefined) ? opts.metaballT : 0;
 
+          // Compute super-edge curves once per render; the curve computation is non-trivial (obstacle avoidance).
+          const curves = (showNeutral && (drawEdges || (withHover && (hoverComp !== null || hoverEdgeComps))))
+            ? computeContractEdgeCurves(cv)
+            : null;
+
           // We'll render pills *after* hover highlights so dashed lines appear under the pill.
           const pills = [];
           const labelFill = bgFill ? bgFill : (bgMode === 'transparent' ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,0.65)');
@@ -2945,8 +3038,6 @@
 
           // Neutral parallel edges (+ embedded multiplicity labels)
           if (showNeutral && drawEdges) {
-            const curves = computeContractEdgeCurves(cv);
-
             ctx.save();
             ctx.strokeStyle = neutralCol;
             ctx.lineCap = 'round';
@@ -3000,8 +3091,7 @@
           }
 
           // Hover node highlight: show all incident remaining edges (strong, like the normal view).
-          if (withHover && hoverComp !== null && !state.gameOver) {
-            const curves = computeContractEdgeCurves(cv);
+          if (withHover && hoverComp !== null && !state.gameOver && curves) {
             ctx.save();
             ctx.globalAlpha = alpha * 0.75;
             ctx.strokeStyle = 'rgba(255,255,255,0.80)';
@@ -3021,8 +3111,7 @@
           }
 
           // Hover edge highlight (super-edge)
-          if (withHover && hoverEdgeComps && !state.gameOver) {
-            const curves = computeContractEdgeCurves(cv);
+          if (withHover && hoverEdgeComps && !state.gameOver && curves) {
             const flashed = hasActiveFlashBetweenComps(cv, hoverEdgeComps.a, hoverEdgeComps.b);
             ctx.save();
             ctx.globalAlpha = 0.70;
