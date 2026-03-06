@@ -1117,6 +1117,9 @@
     // Contract-view merge animation support: when robber adds a red edge that merges components,
     // we keep the pre-merge component partition around so we can animate into the merge.
     let pendingContractFrom = null; // { comps, compOf } captured just before a robber move
+    // Track parallel-edge multiplicity changes in contract view for animations.
+    let contractPrevCounts = new Map(); // key -> count (key uses merged labels)
+    const contractCountAnim = new Map(); // key -> { startMs, durMs, from, to }
 
     let forceAnimRunning = false;
     let forceNeedsRelax = false;
@@ -2570,6 +2573,21 @@
       return best;
     }
 
+    function drawQuadraticSegment(A, C, B, t0, t1, segs = 18) {
+      // Draw a portion of the quadratic curve from t0..t1 as a polyline.
+      const a = clamp(Math.min(t0, t1), 0, 1);
+      const b = clamp(Math.max(t0, t1), 0, 1);
+      if (b - a < 0.0005) return;
+      ctx.beginPath();
+      for (let i = 0; i <= segs; i++) {
+        const t = a + (b - a) * (i / segs);
+        const p = quadAt(A, C, B, t);
+        if (i === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+
     function metaballPath(p1, r1, p2, r2, v, handleLenRate = 2.4, maxDistance = null) {
       // Returns null if no reasonable connection. Otherwise returns
       // { p1a, p1b, p2a, p2b, h1a, h2a, h2b, h1b } for drawing a closed metaball path.
@@ -2677,6 +2695,43 @@
       // We compute red components and treat each as a merged node.
       const { comps, compOf } = computeRedComponents(state);
       return buildContractViewDataFromPartition(nodes, comps, compOf);
+    }
+
+    function contractPairKeyFromLabels(la, lb) {
+      const a = String(la);
+      const b = String(lb);
+      return (a < b) ? `${a}|${b}` : `${b}|${a}`;
+    }
+
+    function updateContractCountAnims(cv) {
+      // Compare current multiplicities vs last frame; if an edge count decreased, pulse it.
+      const cur = new Map();
+      for (const e of cv.edges) {
+        const k = contractPairKeyFromLabels(cv.labels[e.a], cv.labels[e.b]);
+        cur.set(k, e.count | 0);
+      }
+
+      const t = nowMs();
+
+      // Detect decreases
+      for (const [k, newCnt] of cur) {
+        const oldCnt = contractPrevCounts.has(k) ? (contractPrevCounts.get(k) | 0) : null;
+        if (oldCnt !== null && newCnt < oldCnt) {
+          contractCountAnim.set(k, {
+            startMs: t,
+            durMs: 520,
+            from: oldCnt,
+            to: newCnt,
+          });
+        }
+      }
+
+      // Evict old anims
+      for (const [k, a] of contractCountAnim) {
+        if (t - a.startMs > a.durMs + 120) contractCountAnim.delete(k);
+      }
+
+      contractPrevCounts = cur;
     }
 
     function computeContractEdgeCurves(cv) {
@@ -2843,6 +2898,9 @@
           if (a >= 0 && b >= 0 && a !== b) hoverEdgeComps = { a: Math.min(a, b), b: Math.max(a, b) };
         }
 
+        // Detect multiplicity decreases (cop deletions) and animate the pill.
+        updateContractCountAnims(cvMain);
+
         function hasActiveFlashBetweenComps(cv, a, b) {
           if (!blueFlash.size) return false;
           const t = nowMs();
@@ -2933,7 +2991,8 @@
                 const padX = 14 * pillScale;
                 const pillH = 28 * pillScale;
                 const pillW = (tw + padX * 2);
-                pills.push({ mx: c.mid.x, my: c.mid.y, pillW, pillH, text, alpha, hot, hotEdge, glowCol, fontPx });
+                const pairKey = contractPairKeyFromLabels(cv.labels[e.a], cv.labels[e.b]);
+                pills.push({ mx: c.mid.x, my: c.mid.y, pillW, pillH, text, alpha, hot, hotEdge, glowCol, fontPx, pairKey, count: cnt });
               }
             }
 
@@ -2989,37 +3048,69 @@
 
           // Draw multiplicity pills last so hover highlights/dashes run under them.
           if (showNeutral && pills.length && drawPills) {
+            const tNow = nowMs();
             ctx.save();
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             for (const p of pills) {
+              const anim = (p.pairKey && contractCountAnim.has(p.pairKey)) ? contractCountAnim.get(p.pairKey) : null;
+              let pulse = 1;
+              let animGlow = null;
+              let showMinusOne = false;
+              if (anim) {
+                const tt = clamp((tNow - anim.startMs) / Math.max(1, anim.durMs), 0, 1);
+                // Big punchy pop at the start, easing back.
+                const k = (1 - tt);
+                pulse = 1 + 0.55 * k * Math.sin(Math.PI * (1 - tt));
+                animGlow = blueCol;
+                showMinusOne = (anim.from === (anim.to + 1)) && (tt < 0.65);
+              }
+
+              const w2 = p.pillW * pulse;
+              const h2 = p.pillH * pulse;
+
               ctx.save();
               ctx.translate(p.mx, p.my);
               ctx.globalAlpha = p.alpha * (p.hot ? 1.0 : 0.92);
-              ctx.font = `900 ${p.fontPx}px ui-sans-serif, system-ui`;
+              ctx.font = `900 ${Math.round(p.fontPx * (p.hot ? 1.0 : 1.0) * (anim ? 1.06 : 1.0))}px ui-sans-serif, system-ui`;
 
-              roundedRectPath(-p.pillW / 2, -p.pillH / 2, p.pillW, p.pillH, p.pillH / 2);
+              // Cut-out pill
+              roundedRectPath(-w2 / 2, -h2 / 2, w2, h2, h2 / 2);
               ctx.fillStyle = labelFill;
               ctx.fill();
 
-              if (p.glowCol) {
+              // Glow (hover glow + count-change glow)
+              const glow = animGlow || p.glowCol;
+              if (glow) {
                 ctx.save();
-                ctx.shadowColor = p.glowCol;
-                ctx.shadowBlur = p.hotEdge ? 24 : 18;
-                ctx.strokeStyle = p.glowCol;
-                ctx.lineWidth = 6;
-                roundedRectPath(-p.pillW / 2, -p.pillH / 2, p.pillW, p.pillH, p.pillH / 2);
+                ctx.shadowColor = glow;
+                ctx.shadowBlur = (p.hotEdge ? 26 : 18) * (anim ? 1.15 : 1.0);
+                ctx.strokeStyle = glow;
+                ctx.lineWidth = anim ? 8 : 6;
+                roundedRectPath(-w2 / 2, -h2 / 2, w2, h2, h2 / 2);
                 ctx.stroke();
                 ctx.restore();
               }
 
               ctx.strokeStyle = neutralCol;
               ctx.lineWidth = 3.2;
-              roundedRectPath(-p.pillW / 2, -p.pillH / 2, p.pillW, p.pillH, p.pillH / 2);
+              roundedRectPath(-w2 / 2, -h2 / 2, w2, h2, h2 / 2);
               ctx.stroke();
 
+              // Text
               ctx.fillStyle = labelFg;
               ctx.fillText(p.text, 0, 1.0);
+
+              // Small "-1" pop when multiplicity decreases by 1
+              if (showMinusOne) {
+                ctx.save();
+                ctx.globalAlpha = 0.95;
+                ctx.fillStyle = blueCol;
+                ctx.font = '800 14px ui-sans-serif, system-ui';
+                ctx.fillText('-1', w2 * 0.62, -h2 * 0.70);
+                ctx.restore();
+              }
+
               ctx.restore();
             }
             ctx.restore();
@@ -3131,6 +3222,52 @@
             metaballs: mergePairs,
             metaballT,
           });
+
+          // Robber "contraction" edge: keep it visible until the merge completes, and shorten it as the nodes converge.
+          if (mergePairs && mergePairs.length) {
+            const a = mergePairs[0].a;
+            const b = mergePairs[0].b;
+            if (a !== null && b !== null && cvFrom.centers[a] && cvFrom.centers[b]) {
+              const P = cvFrom.centers[a];
+              const Q = cvFrom.centers[b];
+              const dx = Q.x - P.x;
+              const dy = Q.y - P.y;
+              const len = Math.hypot(dx, dy) + 0.001;
+              const ux = dx / len;
+              const uy = dy / len;
+              const px = -uy;
+              const py = ux;
+
+              const rP = contractNodeRadius(cvFrom.sizes[a] || 1) * sFrom;
+              const rQ = contractNodeRadius(cvFrom.sizes[b] || 1) * sFrom;
+              const sign = (String(cvFrom.labels[a]) < String(cvFrom.labels[b])) ? 1 : -1;
+              const amp = sign * (18 + 0.30 * (rP + rQ));
+              const mx = (P.x + Q.x) * 0.5;
+              const my = (P.y + Q.y) * 0.5;
+              const C = { x: mx + px * amp, y: my + py * amp };
+
+              // Shrink visible span toward the midpoint as mergeT increases.
+              const baseTrim = clamp((Math.max(rP, rQ) + 10) / len, 0.06, 0.22);
+              const baseSpan = 1 - 2 * baseTrim;
+              const f = clamp(1 - mergeT, 0, 1);
+              const span = baseSpan * f;
+              const t0 = 0.5 - span * 0.5;
+              const t1 = 0.5 + span * 0.5;
+
+              if (span > 0.02) {
+                ctx.save();
+                ctx.globalAlpha = 0.88;
+                ctx.strokeStyle = redCol;
+                ctx.lineWidth = 6;
+                ctx.lineCap = 'round';
+                ctx.shadowColor = 'rgba(0,0,0,0.35)';
+                ctx.shadowBlur = 10;
+                drawQuadraticSegment(P, C, Q, t0, t1, 22);
+                ctx.restore();
+              }
+            }
+          }
+
           // Post-merge node grows in (edges/pills appear only at the very end to avoid confusing topology mid-merge).
           renderContract(cvMain, 1, true, { nodeScale: sTo, labelScale: sTo, drawEdges: (mergeT > 0.92), drawPills: (mergeT > 0.92), drawNodes: true });
         } else {
