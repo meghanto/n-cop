@@ -2548,6 +2548,28 @@
       return Math.hypot(px - projx, py - projy);
     }
 
+    function quadAt(A, C, B, t) {
+      // Quadratic Bezier point at parameter t.
+      const s = 1 - t;
+      const x = (s * s) * A.x + 2 * s * t * C.x + (t * t) * B.x;
+      const y = (s * s) * A.y + 2 * s * t * C.y + (t * t) * B.y;
+      return { x, y };
+    }
+
+    function distToQuadraticApprox(px, py, A, C, B, segs = 14) {
+      // Approximate point->quadratic distance by sampling polyline segments.
+      let best = Infinity;
+      let prev = A;
+      for (let i = 1; i <= segs; i++) {
+        const t = i / segs;
+        const cur = quadAt(A, C, B, t);
+        const d = distToSegment(px, py, prev.x, prev.y, cur.x, cur.y);
+        if (d < best) best = d;
+        prev = cur;
+      }
+      return best;
+    }
+
     function contractNodeRadius(sz) {
       // Bigger merged nodes so contractions read clearly.
       return 18 + 10 * Math.sqrt(Math.max(1, sz));
@@ -2604,6 +2626,59 @@
       // We compute red components and treat each as a merged node.
       const { comps, compOf } = computeRedComponents(state);
       return buildContractViewDataFromPartition(nodes, comps, compOf);
+    }
+
+    function computeContractEdgeCurves(cv) {
+      // Compute deterministic quadratic-curve control points for all super-edges.
+      // This reduces overlap/collinearity ambiguity (e.g., A-B and A-C looking like B-C).
+      const m = cv.comps.length;
+      const inc = Array.from({ length: m }, () => []); // per node: { ei, ang }
+
+      for (let ei = 0; ei < cv.edges.length; ei++) {
+        const e = cv.edges[ei];
+        const A = cv.centers[e.a];
+        const B = cv.centers[e.b];
+        inc[e.a].push({ ei, ang: Math.atan2(B.y - A.y, B.x - A.x) });
+        inc[e.b].push({ ei, ang: Math.atan2(A.y - B.y, A.x - B.x) });
+      }
+
+      const offAt = Array.from({ length: m }, () => ({}));
+      for (let v = 0; v < m; v++) {
+        inc[v].sort((p, q) => p.ang - q.ang);
+        const d = inc[v].length;
+        const mid = (d - 1) * 0.5;
+        for (let i = 0; i < d; i++) {
+          offAt[v][inc[v][i].ei] = i - mid;
+        }
+      }
+
+      const BASE = 28;
+      const MAX_OFF = 2.2;
+      const curves = new Array(cv.edges.length);
+      for (let ei = 0; ei < cv.edges.length; ei++) {
+        const e = cv.edges[ei];
+        const A = cv.centers[e.a];
+        const B = cv.centers[e.b];
+        const dx = B.x - A.x;
+        const dy = B.y - A.y;
+        const len = Math.hypot(dx, dy) + 0.001;
+        const px = -dy / len;
+        const py = dx / len;
+
+        const oa = offAt[e.a][ei] ?? 0;
+        const ob = offAt[e.b][ei] ?? 0;
+        let off = oa - ob;
+        if (inc[e.a].length <= 1 && inc[e.b].length <= 1) off = 0;
+        off = clamp(off, -MAX_OFF, MAX_OFF);
+
+        const mx = (A.x + B.x) * 0.5;
+        const my = (A.y + B.y) * 0.5;
+        const C = { x: mx + px * BASE * off, y: my + py * BASE * off };
+        const midP = quadAt(A, C, B, 0.5);
+        curves[ei] = { A, B, C, mid: midP, len };
+      }
+
+      return curves;
     }
 
     function draw() {
@@ -2665,15 +2740,17 @@
 
         const smoothstep = (t) => t * t * (3 - 2 * t);
 
-        // If a robber move just merged components, crossfade from the pre-merge partition
-        // into the post-merge partition while the layout transition runs.
+        // If a robber move just merged components, animate the *collision + merge*.
+        // We keep drawing the pre-merge contracted nodes as they move (via the underlying force-layout transition),
+        // then shrink them into the merged node.
         let cvMain = buildContractViewData(nodes);
         let cvFrom = null;
-        let fade = 1;
+        let mergeT = 1;
         if (layout && layout.transition && layout.transition.contractAnim) {
           const tr = layout.transition;
           const t = clamp((nowMs() - tr.startMs) / Math.max(1, tr.durMs), 0, 1);
-          fade = smoothstep(t);
+          // Only start the "merge" sizing in the final part so you see the collision first.
+          mergeT = smoothstep(clamp((t - 0.72) / 0.28, 0, 1));
           const fromP = tr.contractAnim.from;
           const toP = tr.contractAnim.to;
           cvFrom = buildContractViewDataFromPartition(nodes, fromP.comps, fromP.compOf);
@@ -2703,8 +2780,13 @@
           return false;
         }
 
-        function renderContract(cv, alpha, withHover) {
+        function renderContract(cv, alpha, withHover, opts = {}) {
           if (alpha <= 0.001) return;
+          const drawEdges = (opts.drawEdges !== undefined) ? opts.drawEdges : true;
+          const drawPills = (opts.drawPills !== undefined) ? opts.drawPills : true;
+          const drawNodes = (opts.drawNodes !== undefined) ? opts.drawNodes : true;
+          const nodeScale = (opts.nodeScale !== undefined) ? opts.nodeScale : 1;
+          const labelScale = (opts.labelScale !== undefined) ? opts.labelScale : nodeScale;
 
           // We'll render pills *after* hover highlights so dashed lines appear under the pill.
           const pills = [];
@@ -2723,7 +2805,9 @@
           }
 
           // Neutral parallel edges (+ embedded multiplicity labels)
-          if (showNeutral) {
+          if (showNeutral && drawEdges) {
+            const curves = computeContractEdgeCurves(cv);
+
             ctx.save();
             ctx.strokeStyle = neutralCol;
             ctx.lineCap = 'round';
@@ -2731,14 +2815,9 @@
             ctx.textBaseline = 'middle';
             ctx.font = '900 20px ui-sans-serif, system-ui';
 
-            for (const e of cv.edges) {
-              const A = cv.centers[e.a];
-              const B = cv.centers[e.b];
-              const dx = B.x - A.x;
-              const dy = B.y - A.y;
-              const len = Math.hypot(dx, dy) + 0.001;
-              const ux = dx / len;
-              const uy = dy / len;
+            for (let ei = 0; ei < cv.edges.length; ei++) {
+              const e = cv.edges[ei];
+              const c = curves[ei];
 
               const hotNode = withHover && (hoverComp !== null) && (e.a === hoverComp || e.b === hoverComp);
               const hotEdge = withHover && hoverEdgeComps && (e.a === hoverEdgeComps.a && e.b === hoverEdgeComps.b);
@@ -2757,53 +2836,23 @@
               ctx.lineWidth = hot ? (lwBase + 0.9) : lwBase;
               ctx.globalAlpha = alpha * (hot ? 0.98 : 0.62);
 
-              // If cnt>1, cut out a small gap in the edge for an embedded label.
-              let gap = 0;
-              let pillW = 0;
-              let pillH = 0;
-              const text = String(cnt);
-              const pillScale = hotEdge ? 1.30 : hotNode ? 1.18 : 1.0;
+              // Draw as a curve to reduce overlap ambiguity.
+              ctx.beginPath();
+              ctx.moveTo(c.A.x, c.A.y);
+              ctx.quadraticCurveTo(c.C.x, c.C.y, c.B.x, c.B.y);
+              ctx.stroke();
 
-              if (cnt > 1) {
+              // Pill info (drawn later, on top of dashed highlights)
+              if (cnt > 1 && drawPills) {
+                const text = String(cnt);
+                const pillScale = (hotEdge ? 1.30 : hotNode ? 1.18 : 1.0);
                 const fontPx = (hot ? 24 : 20);
                 ctx.font = `900 ${fontPx}px ui-sans-serif, system-ui`;
                 const tw = ctx.measureText(text).width;
-
                 const padX = 14 * pillScale;
-                pillH = 28 * pillScale;
-                pillW = (tw + padX * 2);
-
-                // Cut out enough of the line so the (horizontal) pill doesn't overlap the stroke.
-                const halfDiag = Math.hypot(pillW * 0.5, pillH * 0.5);
-                gap = Math.min((halfDiag + 12), len * 0.40);
-              } else {
-                // restore font for measureText consistency across edges
-                ctx.font = '900 20px ui-sans-serif, system-ui';
-              }
-
-              ctx.beginPath();
-              if (cnt > 1 && len > gap * 2 + 8) {
-                const mx = (A.x + B.x) * 0.5;
-                const my = (A.y + B.y) * 0.5;
-                const x1 = mx - ux * gap;
-                const y1 = my - uy * gap;
-                const x2 = mx + ux * gap;
-                const y2 = my + uy * gap;
-                ctx.moveTo(A.x, A.y);
-                ctx.lineTo(x1, y1);
-                ctx.moveTo(x2, y2);
-                ctx.lineTo(B.x, B.y);
-              } else {
-                ctx.moveTo(A.x, A.y);
-                ctx.lineTo(B.x, B.y);
-              }
-              ctx.stroke();
-
-              if (cnt > 1) {
-                const mx = (A.x + B.x) * 0.5;
-                const my = (A.y + B.y) * 0.5;
-                const fontPx = hot ? 24 : 20;
-                pills.push({ mx, my, pillW, pillH, text, alpha, hot, hotEdge, glowCol, fontPx });
+                const pillH = 28 * pillScale;
+                const pillW = (tw + padX * 2);
+                pills.push({ mx: c.mid.x, my: c.mid.y, pillW, pillH, text, alpha, hot, hotEdge, glowCol, fontPx });
               }
             }
 
@@ -2812,18 +2861,19 @@
 
           // Hover node highlight: show all incident remaining edges (strong, like the normal view).
           if (withHover && hoverComp !== null && !state.gameOver) {
+            const curves = computeContractEdgeCurves(cv);
             ctx.save();
             ctx.globalAlpha = alpha * 0.75;
             ctx.strokeStyle = 'rgba(255,255,255,0.80)';
             ctx.lineWidth = 6;
             ctx.setLineDash([10, 7]);
-            for (const e of cv.edges) {
+            for (let ei = 0; ei < cv.edges.length; ei++) {
+              const e = cv.edges[ei];
               if (e.a !== hoverComp && e.b !== hoverComp) continue;
-              const A = cv.centers[e.a];
-              const B = cv.centers[e.b];
+              const c = curves[ei];
               ctx.beginPath();
-              ctx.moveTo(A.x, A.y);
-              ctx.lineTo(B.x, B.y);
+              ctx.moveTo(c.A.x, c.A.y);
+              ctx.quadraticCurveTo(c.C.x, c.C.y, c.B.x, c.B.y);
               ctx.stroke();
             }
             ctx.setLineDash([]);
@@ -2832,8 +2882,7 @@
 
           // Hover edge highlight (super-edge)
           if (withHover && hoverEdgeComps && !state.gameOver) {
-            const A = cv.centers[hoverEdgeComps.a];
-            const B = cv.centers[hoverEdgeComps.b];
+            const curves = computeContractEdgeCurves(cv);
             const flashed = hasActiveFlashBetweenComps(cv, hoverEdgeComps.a, hoverEdgeComps.b);
             ctx.save();
             ctx.globalAlpha = 0.70;
@@ -2841,16 +2890,24 @@
             ctx.strokeStyle = flashed ? blueCol : ((state.turn === COP) ? blueCol : redCol);
             ctx.lineWidth = 6;
             ctx.setLineDash([8, 6]);
-            ctx.beginPath();
-            ctx.moveTo(A.x, A.y);
-            ctx.lineTo(B.x, B.y);
-            ctx.stroke();
+
+            for (let ei = 0; ei < cv.edges.length; ei++) {
+              const e = cv.edges[ei];
+              if (e.a !== hoverEdgeComps.a || e.b !== hoverEdgeComps.b) continue;
+              const c = curves[ei];
+              ctx.beginPath();
+              ctx.moveTo(c.A.x, c.A.y);
+              ctx.quadraticCurveTo(c.C.x, c.C.y, c.B.x, c.B.y);
+              ctx.stroke();
+              break;
+            }
+
             ctx.setLineDash([]);
             ctx.restore();
           }
 
           // Draw multiplicity pills last so hover highlights/dashes run under them.
-          if (showNeutral && pills.length) {
+          if (showNeutral && pills.length && drawPills) {
             ctx.save();
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
@@ -2887,59 +2944,70 @@
             ctx.restore();
           }
 
-          // Contracted nodes
-          const highlight01 = els.highlight01.checked;
-          for (let ci = 0; ci < cv.comps.length; ci++) {
-            const p = cv.centers[ci];
-            const sz = cv.sizes[ci];
-            const r = contractNodeRadius(sz);
-            const is01 = highlight01 && (cv.has0[ci] || cv.has1[ci]);
+          if (drawNodes) {
+            // Contracted nodes
+            const highlight01 = els.highlight01.checked;
+            for (let ci = 0; ci < cv.comps.length; ci++) {
+              const p = cv.centers[ci];
+              const sz = cv.sizes[ci];
+              const r = contractNodeRadius(sz) * nodeScale;
+              const is01 = highlight01 && (cv.has0[ci] || cv.has1[ci]);
 
-            ctx.save();
-            ctx.globalAlpha = alpha;
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-            ctx.fillStyle = is01 ? node0Col : nodeCol;
-            ctx.shadowColor = 'rgba(0,0,0,0.4)';
-            ctx.shadowBlur = 12;
-            ctx.fill();
-            ctx.shadowBlur = 0;
-
-            // Outline: red if merged (>1), else subtle dark.
-            ctx.lineWidth = (sz > 1) ? 4 : 2;
-            ctx.strokeStyle = (sz > 1) ? redCol : 'rgba(0,0,0,0.45)';
-            ctx.stroke();
-            ctx.restore();
-
-            // Hover ring
-            if (withHover && hoverComp === ci && !state.gameOver) {
               ctx.save();
+              ctx.globalAlpha = alpha;
               ctx.beginPath();
-              ctx.arc(p.x, p.y, r + 8, 0, Math.PI * 2);
-              ctx.strokeStyle = 'rgba(255,255,255,0.80)';
-              ctx.lineWidth = 4;
+              ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+              ctx.fillStyle = is01 ? node0Col : nodeCol;
+              ctx.shadowColor = 'rgba(0,0,0,0.4)';
+              ctx.shadowBlur = 12;
+              ctx.fill();
+              ctx.shadowBlur = 0;
+
+              // Outline: red if merged (>1), else subtle dark.
+              ctx.lineWidth = ((sz > 1) ? 4 : 2) * Math.max(0.55, nodeScale);
+              ctx.strokeStyle = (sz > 1) ? redCol : 'rgba(0,0,0,0.45)';
               ctx.stroke();
               ctx.restore();
-            }
 
-            // Label: always show in contraction view.
-            ctx.save();
-            ctx.globalAlpha = alpha;
-            const label = cv.labels[ci];
-            const fs = (label.length > 18) ? 11 : (label.length > 14) ? 12 : (label.length > 10) ? 13 : 15;
-            ctx.font = `900 ${fs}px ui-sans-serif, system-ui`;
-            ctx.fillStyle = 'rgba(0,0,0,0.78)';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(label, p.x, p.y);
-            ctx.restore();
+              // Hover ring
+              if (withHover && hoverComp === ci && !state.gameOver) {
+                ctx.save();
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, r + 8, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(255,255,255,0.80)';
+                ctx.lineWidth = 4;
+                ctx.stroke();
+                ctx.restore();
+              }
+
+              // Label: always show in contraction view.
+              // During merge shrink, avoid drawing microscopic text.
+              if (labelScale > 0.35) {
+                ctx.save();
+                ctx.globalAlpha = alpha;
+                const label = cv.labels[ci];
+                const fs0 = (label.length > 18) ? 11 : (label.length > 14) ? 12 : (label.length > 10) ? 13 : 15;
+                const fs = Math.max(8, Math.round(fs0 * labelScale));
+                ctx.font = `900 ${fs}px ui-sans-serif, system-ui`;
+                ctx.fillStyle = 'rgba(0,0,0,0.78)';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(label, p.x, p.y);
+                ctx.restore();
+              }
+            }
           }
         }
 
-        // If we have a merge animation, draw the pre-merge partition first, then crossfade into the post-merge partition.
+        // If we have a merge animation, draw the pre-merge nodes moving/colliding,
+        // then shrink them into the merged node (no fade-in/out).
         if (cvFrom) {
-          renderContract(cvFrom, 1 - fade, false);
-          renderContract(cvMain, fade, true);
+          const sTo = mergeT;
+          const sFrom = 1 - mergeT;
+          // Pre-merge view (full graph) while nodes collide.
+          renderContract(cvFrom, 1, false, { nodeScale: sFrom, labelScale: sFrom, drawEdges: true, drawPills: true, drawNodes: true });
+          // Post-merge node grows in (edges/pills appear only at the very end to avoid confusing topology mid-merge).
+          renderContract(cvMain, 1, true, { nodeScale: sTo, labelScale: sTo, drawEdges: (mergeT > 0.92), drawPills: (mergeT > 0.92), drawNodes: true });
         } else {
           renderContract(cvMain, 1, true);
         }
@@ -4924,16 +4992,17 @@
       // Pick a contracted super-edge, returning an underlying legal original edge {u,v}.
       ensureLayout(state.k);
       const cv = buildContractViewData(layout.nodes);
+      const curves = computeContractEdgeCurves(cv);
 
       const hitPx = Number(els.hitRadius.value) || 10;
       const hit = hitPx / Math.max(0.0001, view.scale);
 
-      let best = null;
+      let best = null; // edge object
       let bestD = Infinity;
-      for (const e of cv.edges) {
-        const A = cv.centers[e.a];
-        const B = cv.centers[e.b];
-        const d = distToSegment(x, y, A.x, A.y, B.x, B.y);
+      for (let ei = 0; ei < cv.edges.length; ei++) {
+        const e = cv.edges[ei];
+        const c = curves[ei];
+        const d = distToQuadraticApprox(x, y, c.A, c.C, c.B);
         if (d < bestD) {
           bestD = d;
           best = e;
