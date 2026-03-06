@@ -2358,7 +2358,11 @@
       }
 
       // Smoothly transition to the new converged layout.
-      const durMs = Math.max(700, Math.min(2800, 700 + maxD * 5.0));
+      let durMs = Math.max(700, Math.min(2800, 700 + maxD * 5.0));
+      // Give robber-contraction merges a bit more time to "breathe".
+      if (contractAnim) {
+        durMs = Math.min(4800, Math.max(durMs, 1400) * 1.25);
+      }
       layout.transition = {
         from,
         to,
@@ -2668,8 +2672,7 @@
         if (layout && layout.transition && layout.transition.contractAnim) {
           const tr = layout.transition;
           const t = clamp((nowMs() - tr.startMs) / Math.max(1, tr.durMs), 0, 1);
-          const raw = clamp((t - 0.35) / 0.65, 0, 1);
-          fade = smoothstep(raw);
+          fade = smoothstep(t);
           const fromP = tr.contractAnim.from;
           const toP = tr.contractAnim.to;
           cvFrom = buildContractViewDataFromPartition(nodes, fromP.comps, fromP.compOf);
@@ -2702,64 +2705,101 @@
         function renderContract(cv, alpha, withHover) {
           if (alpha <= 0.001) return;
 
-          // Neutral parallel edges
+          // Neutral parallel edges (+ embedded multiplicity labels)
           if (showNeutral) {
+            const labelFill = bgFill ? bgFill : (bgMode === 'transparent' ? 'rgba(0,0,0,0)' : 'rgba(0,0,0,0.65)');
+            const labelFg = (bgMode === 'light') ? 'rgba(0,0,0,0.88)' : 'rgba(255,255,255,0.92)';
+
+            function roundedRectPath(x, y, w, h, r) {
+              const rr = Math.max(0, Math.min(r, Math.min(w, h) * 0.5));
+              ctx.beginPath();
+              ctx.moveTo(x + rr, y);
+              ctx.arcTo(x + w, y, x + w, y + h, rr);
+              ctx.arcTo(x + w, y + h, x, y + h, rr);
+              ctx.arcTo(x, y + h, x, y, rr);
+              ctx.arcTo(x, y, x + w, y, rr);
+              ctx.closePath();
+            }
+
             ctx.save();
             ctx.strokeStyle = neutralCol;
-            ctx.lineWidth = 2.0;
-            for (const e of cv.edges) {
-              const A = cv.centers[e.a];
-              const B = cv.centers[e.b];
-              const hot = withHover && ((hoverComp !== null && (e.a === hoverComp || e.b === hoverComp)) ||
-                (hoverEdgeComps && e.a === hoverEdgeComps.a && e.b === hoverEdgeComps.b));
-              ctx.globalAlpha = alpha * (hot ? 0.98 : 0.62);
-              ctx.beginPath();
-              ctx.moveTo(A.x, A.y);
-              ctx.lineTo(B.x, B.y);
-              ctx.stroke();
-            }
-            ctx.restore();
-
-            // Edge multiplicity labels (N for N parallel remaining edges) — make prominent.
-            ctx.save();
+            ctx.lineCap = 'round';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.font = '700 18px ui-sans-serif, system-ui';
+            ctx.font = '800 16px ui-sans-serif, system-ui';
+
             for (const e of cv.edges) {
-              if (e.count <= 1) continue;
               const A = cv.centers[e.a];
               const B = cv.centers[e.b];
-              const mx0 = (A.x + B.x) * 0.5;
-              const my0 = (A.y + B.y) * 0.5;
               const dx = B.x - A.x;
               const dy = B.y - A.y;
               const len = Math.hypot(dx, dy) + 0.001;
-              const ox = (-dy / len) * 14;
-              const oy = (dx / len) * 14;
-              const mx = mx0 + ox;
-              const my = my0 + oy;
+              const ux = dx / len;
+              const uy = dy / len;
 
-              const text = String(e.count);
-              const r = 15;
-              ctx.globalAlpha = alpha * 0.95;
-              ctx.save();
-              ctx.shadowColor = 'rgba(0,0,0,0.35)';
-              ctx.shadowBlur = 10;
-              ctx.fillStyle = 'rgba(255, 214, 102, 0.95)';
-              ctx.beginPath();
-              ctx.arc(mx, my, r, 0, Math.PI * 2);
-              ctx.fill();
-              ctx.restore();
+              const hot = withHover && ((hoverComp !== null && (e.a === hoverComp || e.b === hoverComp)) ||
+                (hoverEdgeComps && e.a === hoverEdgeComps.a && e.b === hoverEdgeComps.b));
 
-              ctx.strokeStyle = 'rgba(0,0,0,0.45)';
-              ctx.lineWidth = 2;
+              const cnt = e.count || 1;
+              const lw = clamp(1.9 + 0.9 * Math.log2(cnt), 1.9, 5.2);
+              ctx.lineWidth = lw;
+              ctx.globalAlpha = alpha * (hot ? 0.98 : 0.62);
+
+              // If cnt>1, cut out a small gap in the edge for an embedded label.
+              let gap = 0;
+              let pillW = 0;
+              let pillH = 0;
+              const text = String(cnt);
+              if (cnt > 1) {
+                const tw = ctx.measureText(text).width;
+                const padX = 10;
+                pillW = tw + padX * 2;
+                pillH = 20;
+                gap = Math.min((pillW * 0.5 + 8), len * 0.35);
+              }
+
               ctx.beginPath();
-              ctx.arc(mx, my, r, 0, Math.PI * 2);
+              if (cnt > 1 && len > gap * 2 + 8) {
+                const mx = (A.x + B.x) * 0.5;
+                const my = (A.y + B.y) * 0.5;
+                const x1 = mx - ux * gap;
+                const y1 = my - uy * gap;
+                const x2 = mx + ux * gap;
+                const y2 = my + uy * gap;
+                ctx.moveTo(A.x, A.y);
+                ctx.lineTo(x1, y1);
+                ctx.moveTo(x2, y2);
+                ctx.lineTo(B.x, B.y);
+              } else {
+                ctx.moveTo(A.x, A.y);
+                ctx.lineTo(B.x, B.y);
+              }
               ctx.stroke();
 
-              ctx.fillStyle = 'rgba(0,0,0,0.88)';
-              ctx.fillText(text, mx, my + 0.5);
+              if (cnt > 1) {
+                const mx = (A.x + B.x) * 0.5;
+                const my = (A.y + B.y) * 0.5;
+                const theta = Math.atan2(dy, dx);
+
+                ctx.save();
+                ctx.translate(mx, my);
+                ctx.rotate(theta);
+                ctx.globalAlpha = alpha * (hot ? 1.0 : 0.92);
+
+                roundedRectPath(-pillW / 2, -pillH / 2, pillW, pillH, pillH / 2);
+                ctx.fillStyle = labelFill;
+                ctx.fill();
+
+                ctx.strokeStyle = neutralCol;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                ctx.fillStyle = labelFg;
+                ctx.fillText(text, 0, 0.6);
+                ctx.restore();
+              }
             }
+
             ctx.restore();
           }
 
