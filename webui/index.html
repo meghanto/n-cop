@@ -1117,6 +1117,8 @@
     let exportBusy = false;
     let ffmpegInstance = null;
     let ffmpegCore = null; // { coreURL, wasmURL } blob URLs
+    let ffmpegClassWorkerURL = null; // blob URL for @ffmpeg/ffmpeg worker (patched to use blob deps)
+    let ffmpegClassWorkerDeps = null; // [blobURL,...] to optionally revoke later
     let ffmpegLoading = null;
 
     function showExportOverlay(title, sub = '', frac = null) {
@@ -1200,6 +1202,30 @@
         const { FFmpeg } = await import('https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');
         ffmpegInstance = new FFmpeg();
 
+        // Some browsers block cross-origin module workers.
+        // Work around by fetching the worker module + its tiny deps and creating blob: URLs.
+        if (!ffmpegClassWorkerURL) {
+          showExportOverlay('Loading ffmpeg.wasm…', 'Preparing worker…', null);
+          const BASE = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/';
+          const [workerSrc, constSrc, errorsSrc] = await Promise.all([
+            fetch(BASE + 'worker.js').then(r => { if (!r.ok) throw new Error('Failed to fetch ffmpeg worker.js'); return r.text(); }),
+            fetch(BASE + 'const.js').then(r => { if (!r.ok) throw new Error('Failed to fetch ffmpeg const.js'); return r.text(); }),
+            fetch(BASE + 'errors.js').then(r => { if (!r.ok) throw new Error('Failed to fetch ffmpeg errors.js'); return r.text(); }),
+          ]);
+
+          const constURL = URL.createObjectURL(new Blob([constSrc], { type: 'text/javascript' }));
+          const errorsURL = URL.createObjectURL(new Blob([errorsSrc], { type: 'text/javascript' }));
+          let patched = workerSrc;
+          patched = patched.replaceAll('from "./const.js"', `from "${constURL}"`);
+          patched = patched.replaceAll("from './const.js'", `from "${constURL}"`);
+          patched = patched.replaceAll('from "./errors.js"', `from "${errorsURL}"`);
+          patched = patched.replaceAll("from './errors.js'", `from "${errorsURL}"`);
+
+          const workerURL = URL.createObjectURL(new Blob([patched], { type: 'text/javascript' }));
+          ffmpegClassWorkerURL = workerURL;
+          ffmpegClassWorkerDeps = [constURL, errorsURL];
+        }
+
         if (!ffmpegCore) {
           const CORE_JS = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.js';
           const CORE_WASM = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.wasm';
@@ -1230,7 +1256,11 @@
         }
 
         showExportOverlay('Loading ffmpeg.wasm…', 'Initializing…', null);
-        await ffmpegInstance.load({ coreURL: ffmpegCore.coreURL, wasmURL: ffmpegCore.wasmURL });
+        await ffmpegInstance.load({
+          classWorkerURL: ffmpegClassWorkerURL,
+          coreURL: ffmpegCore.coreURL,
+          wasmURL: ffmpegCore.wasmURL,
+        });
         return ffmpegInstance;
       })().finally(() => {
         exportBusy = prevBusy;
