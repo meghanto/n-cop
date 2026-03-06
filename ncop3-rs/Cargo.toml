@@ -1,0 +1,19 @@
+[package]
+name = "ncop3-rs"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+parallel = ["rayon"]
+
+[dependencies]
+itertools = "0.14.0"
+nauty-pet = "0.14.1"
+petgraph = "0.8.3"
+rayon = { version = "1.11.0", optional = true }
+weak-table = "0.3.2"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "fat"

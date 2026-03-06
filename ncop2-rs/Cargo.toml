@@ -1,0 +1,17 @@
+[package]
+name = "ncop2-rs"
+version = "0.3.0"
+edition = "2024"
+
+[dependencies]
+itertools = "0.14.0"
+rayon = "1.11.0"
+parking_lot = "0.12"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "fat"
+panic = "abort"
+strip = "symbols"
+debug = false
