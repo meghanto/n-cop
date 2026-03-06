@@ -202,6 +202,38 @@
       line-height: 1.35;
     }
 
+    .exportOverlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.55);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+      padding: 18px;
+    }
+
+    .exportCard {
+      width: min(520px, 92vw);
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(20, 22, 28, 0.92);
+      padding: 14px;
+      box-shadow: 0 16px 60px rgba(0,0,0,0.55);
+    }
+
+    .exportTitle {
+      font-size: 13px;
+      color: var(--fg);
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    .exportProg {
+      width: 100%;
+      height: 14px;
+    }
+
     .status strong { font-weight: 700; }
     .status .cop { color: var(--blue); font-weight: 700; }
     .status .robber { color: var(--red); font-weight: 700; }
@@ -371,6 +403,7 @@
           <button id="posImport" type="button">Import</button>
           <button id="posCopy" type="button">Copy</button>
           <button id="posCopyLink" type="button">Copy Link</button>
+          <button id="exportGif" type="button" title="Loads ffmpeg.wasm on demand">Export GIF</button>
         </div>
         <div class="posHelp">Export uses the same move notation as the Moves list. “Copy Link” writes a URL hash like <code>#k=8&amp;n=2&amp;t=C&amp;l=2&amp;m=0-2~1-5.3-4~</code> which auto-loads on open.</div>
       </div>
@@ -422,6 +455,17 @@
       </div>
 
       <canvas id="board" width="1200" height="800"></canvas>
+    </div>
+  </div>
+
+  <div id="exportOverlay" class="exportOverlay" aria-hidden="true">
+    <div class="exportCard">
+      <div id="exportTitle" class="exportTitle">Loading…</div>
+      <progress id="exportProgress" class="exportProg" max="1" value="0"></progress>
+      <div id="exportSub" class="posHelp" style="margin-top:10px"></div>
+      <div class="posBtnRow" style="justify-content:flex-end">
+        <button id="exportClose" type="button">Close</button>
+      </div>
     </div>
   </div>
 
@@ -1000,6 +1044,12 @@
       posImport: document.getElementById('posImport'),
       posCopy: document.getElementById('posCopy'),
       posCopyLink: document.getElementById('posCopyLink'),
+      exportGif: document.getElementById('exportGif'),
+      exportOverlay: document.getElementById('exportOverlay'),
+      exportTitle: document.getElementById('exportTitle'),
+      exportProgress: document.getElementById('exportProgress'),
+      exportSub: document.getElementById('exportSub'),
+      exportClose: document.getElementById('exportClose'),
       histStart: document.getElementById('histStart'),
       histPrev: document.getElementById('histPrev'),
       histNext: document.getElementById('histNext'),
@@ -1061,6 +1111,303 @@
         els.aiThinkingDot.style.background = col || 'var(--muted)';
       }
       els.aiThinking.style.display = 'flex';
+    }
+
+    // --- Media export (lazy ffmpeg.wasm) -------------------------------------
+    let exportBusy = false;
+    let ffmpegInstance = null;
+    let ffmpegCore = null; // { coreURL, wasmURL } blob URLs
+    let ffmpegLoading = null;
+
+    function showExportOverlay(title, sub = '', frac = null) {
+      if (!els.exportOverlay) return;
+      els.exportOverlay.style.display = 'flex';
+      els.exportOverlay.setAttribute('aria-hidden', 'false');
+      if (els.exportTitle) els.exportTitle.textContent = String(title || '');
+      if (els.exportSub) els.exportSub.textContent = String(sub || '');
+      if (els.exportProgress) {
+        if (frac === null || frac === undefined || !Number.isFinite(frac)) {
+          els.exportProgress.removeAttribute('value');
+        } else {
+          els.exportProgress.max = 1;
+          els.exportProgress.value = Math.max(0, Math.min(1, frac));
+        }
+      }
+    }
+
+    function hideExportOverlay() {
+      if (!els.exportOverlay) return;
+      els.exportOverlay.style.display = 'none';
+      els.exportOverlay.setAttribute('aria-hidden', 'true');
+    }
+
+    function fmtBytes(n) {
+      const x = Number(n) || 0;
+      if (x < 1024) return `${x} B`;
+      if (x < 1024 * 1024) return `${(x / 1024).toFixed(1)} KB`;
+      if (x < 1024 * 1024 * 1024) return `${(x / (1024 * 1024)).toFixed(1)} MB`;
+      return `${(x / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+    }
+
+    async function fetchU8WithProgress(url, onProgress) {
+      const res = await fetch(url, { cache: 'force-cache' });
+      if (!res.ok) throw new Error(`Failed to fetch ${url} (${res.status})`);
+      const total = Number(res.headers.get('content-length')) || 0;
+      if (!res.body || !res.body.getReader) {
+        const buf = await res.arrayBuffer();
+        if (onProgress) onProgress(buf.byteLength, buf.byteLength);
+        return new Uint8Array(buf);
+      }
+
+      const reader = res.body.getReader();
+      const chunks = [];
+      let loaded = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        loaded += value.byteLength;
+        if (onProgress) onProgress(loaded, total);
+      }
+      const out = new Uint8Array(loaded);
+      let off = 0;
+      for (const c of chunks) {
+        out.set(c, off);
+        off += c.byteLength;
+      }
+      if (onProgress) onProgress(loaded, total || loaded);
+      return out;
+    }
+
+    async function fetchToBlobURL(url, mime, progressCb) {
+      const u8 = await fetchU8WithProgress(url, progressCb);
+      return URL.createObjectURL(new Blob([u8], { type: mime }));
+    }
+
+    async function ensureFFmpegLoaded() {
+      if (ffmpegInstance && ffmpegInstance.loaded) return ffmpegInstance;
+      if (ffmpegLoading) return ffmpegLoading;
+
+      const prevBusy = exportBusy;
+      exportBusy = true;
+      ffmpegLoading = (async () => {
+        if (location.protocol === 'file:') {
+          throw new Error('GIF export requires running over https:// (GitHub Pages is fine). file:// cannot load ffmpeg.wasm.');
+        }
+
+        showExportOverlay('Loading ffmpeg.wasm…', 'Downloading JS module…', null);
+
+        const { FFmpeg } = await import('https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');
+        ffmpegInstance = new FFmpeg();
+
+        if (!ffmpegCore) {
+          const CORE_JS = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.js';
+          const CORE_WASM = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm/ffmpeg-core.wasm';
+
+          let jsLoaded = 0, jsTotal = 0;
+          let wasmLoaded = 0, wasmTotal = 0;
+
+          const upd = () => {
+            const total = (jsTotal || 0) + (wasmTotal || 0);
+            const loaded = jsLoaded + wasmLoaded;
+            const frac = total ? (loaded / total) : null;
+            const sub = total
+              ? `Downloading core (${fmtBytes(loaded)} / ${fmtBytes(total)})`
+              : `Downloading core (${fmtBytes(loaded)})`;
+            showExportOverlay('Loading ffmpeg.wasm…', sub, frac);
+          };
+
+          showExportOverlay('Loading ffmpeg.wasm…', 'Downloading core (1/2)…', 0);
+          const coreURL = await fetchToBlobURL(CORE_JS, 'text/javascript', (l, t) => {
+            jsLoaded = l; jsTotal = t || 0; upd();
+          });
+          showExportOverlay('Loading ffmpeg.wasm…', 'Downloading core (2/2)…', 0.25);
+          const wasmURL = await fetchToBlobURL(CORE_WASM, 'application/wasm', (l, t) => {
+            wasmLoaded = l; wasmTotal = t || 0; upd();
+          });
+
+          ffmpegCore = { coreURL, wasmURL };
+        }
+
+        showExportOverlay('Loading ffmpeg.wasm…', 'Initializing…', null);
+        await ffmpegInstance.load({ coreURL: ffmpegCore.coreURL, wasmURL: ffmpegCore.wasmURL });
+        return ffmpegInstance;
+      })().finally(() => {
+        exportBusy = prevBusy;
+      });
+
+      try {
+        const ff = await ffmpegLoading;
+        ffmpegLoading = null;
+        return ff;
+      } catch (e) {
+        ffmpegLoading = null;
+        throw e;
+      }
+    }
+
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    }
+
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    async function canvasToPngU8Scaled(targetW) {
+      const srcW = els.canvas.width;
+      const srcH = els.canvas.height;
+      const w = Math.max(2, targetW | 0);
+      const h = Math.max(2, Math.round(srcH * (w / srcW)));
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      const cctx = c.getContext('2d');
+      cctx.imageSmoothingEnabled = true;
+      cctx.imageSmoothingQuality = 'high';
+      cctx.drawImage(els.canvas, 0, 0, w, h);
+
+      const blob = await new Promise(resolve => c.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error('Failed to capture frame');
+      const buf = await blob.arrayBuffer();
+      return new Uint8Array(buf);
+    }
+
+    async function exportGifDemo() {
+      // Lazy-load ffmpeg only when exporting.
+      const orig = {
+        copView: els.copView.value,
+        showNeutral: els.showNeutral.value,
+        autoCop: els.autoCop.checked,
+        autoRobber: els.autoRobber.checked,
+        view: { scale: view.scale, offsetX: view.offsetX, offsetY: view.offsetY },
+      };
+
+      let succeeded = false;
+      try {
+        exportBusy = true;
+        showExportOverlay('Preparing GIF export…', 'Loading ffmpeg if needed…', null);
+
+        // stop autoplay during export
+        els.autoCop.checked = false;
+        els.autoRobber.checked = false;
+
+        // Stabilize view for capture
+        resetView();
+        draw();
+
+        const ffmpeg = await ensureFFmpegLoaded();
+
+        const fps = 18;
+        const holdSecs = 1.4;
+        const transSecs = 0.7;
+        const targetW = 900;
+
+        const modes = ['blue', 'delete', 'robber'];
+        const frames = [];
+        let frameNo = 0;
+
+        async function captureFor(secs) {
+          const count = Math.max(1, Math.round(secs * fps));
+          for (let i = 0; i < count; i++) {
+            draw();
+            frames.push(await canvasToPngU8Scaled(targetW));
+            frameNo++;
+            showExportOverlay('Capturing frames…', `${frameNo} frames`, null);
+            await sleep(1000 / fps);
+          }
+        }
+
+        // Capture initial mode hold
+        showExportOverlay('Capturing frames…', 'Mode: blue', 0);
+        await captureFor(holdSecs);
+
+        for (let mi = 1; mi < modes.length; mi++) {
+          els.copView.value = modes[mi];
+          handleCopViewChange();
+          showExportOverlay('Capturing frames…', `Mode: ${modes[mi]} (transition)`, null);
+          await captureFor(transSecs + holdSecs);
+        }
+
+        // Encode GIF
+        showExportOverlay('Encoding GIF…', 'Writing frames to ffmpeg FS…', 0);
+
+        // Clean any prior outputs if present.
+        try { await ffmpeg.deleteFile('out.gif'); } catch {}
+        try { await ffmpeg.deleteFile('palette.png'); } catch {}
+
+        const pad = (n, w) => String(n).padStart(w, '0');
+        for (let i = 0; i < frames.length; i++) {
+          const name = `frame${pad(i, 4)}.png`;
+          await ffmpeg.writeFile(name, frames[i]);
+          if (i % 10 === 0) {
+            showExportOverlay('Encoding GIF…', `Writing frames (${i + 1}/${frames.length})`, (i + 1) / frames.length * 0.25);
+            await sleep(0);
+          }
+        }
+
+        const progHandler = (p) => {
+          const r = (p && (p.ratio ?? p.progress)) || 0;
+          // map exec progress into [0.25,1]
+          const mapped = 0.25 + 0.75 * Math.max(0, Math.min(1, r));
+          showExportOverlay('Encoding GIF…', `ffmpeg running… (${Math.round(r * 100)}%)`, mapped);
+        };
+        ffmpeg.on('progress', progHandler);
+
+        try {
+          // palette pass
+          showExportOverlay('Encoding GIF…', 'Generating palette…', 0.25);
+          await ffmpeg.exec([
+            '-framerate', String(fps),
+            '-i', 'frame%04d.png',
+            '-vf', `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen`,
+            'palette.png'
+          ]);
+
+          // gif pass
+          showExportOverlay('Encoding GIF…', 'Encoding GIF…', 0.5);
+          await ffmpeg.exec([
+            '-framerate', String(fps),
+            '-i', 'frame%04d.png',
+            '-i', 'palette.png',
+            '-lavfi', `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a`,
+            '-loop', '0',
+            'out.gif'
+          ]);
+        } finally {
+          ffmpeg.off('progress', progHandler);
+        }
+
+        showExportOverlay('Encoding GIF…', 'Finalizing…', 0.98);
+        const out = await ffmpeg.readFile('out.gif');
+        const blob = new Blob([out.buffer], { type: 'image/gif' });
+        downloadBlob(blob, 'ncop-views.gif');
+
+        showExportOverlay('Done', 'Downloaded ncop-views.gif', 1);
+        succeeded = true;
+        await sleep(400);
+      } catch (e) {
+        showExportOverlay('Export failed', (e && e.message) ? e.message : String(e), null);
+        // keep the overlay visible so the user can read the error; Close button will dismiss it.
+      } finally {
+        // restore UI
+        els.copView.value = orig.copView;
+        els.showNeutral.value = orig.showNeutral;
+        els.autoCop.checked = orig.autoCop;
+        els.autoRobber.checked = orig.autoRobber;
+        view.scale = orig.view.scale;
+        view.offsetX = orig.view.offsetX;
+        view.offsetY = orig.view.offsetY;
+        if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
+        exportBusy = false;
+        if (succeeded) hideExportOverlay();
+        handleCopViewChange();
+      }
     }
 
     function resetView() {
@@ -3543,6 +3890,24 @@
         const ok = await copyTextToClipboard(url);
         if (!ok) alert('Copy failed.');
         if (els.posText) els.posText.value = exportPositionText(state);
+      });
+    }
+
+    if (els.exportGif) {
+      els.exportGif.addEventListener('click', async () => {
+        try {
+          await exportGifDemo();
+        } catch (e) {
+          // errors are shown in the overlay
+          console.error(e);
+        }
+      });
+    }
+
+    if (els.exportClose) {
+      els.exportClose.addEventListener('click', () => {
+        if (exportBusy) return;
+        hideExportOverlay();
       });
     }
 
