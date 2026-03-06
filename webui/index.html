@@ -1614,21 +1614,18 @@
 
           const holdFrames = 1; // brief pause per position
 
-          // Smoothness: prefer many in-between frames per move.
-          // Keep an upper bound so we don't blow up ffmpeg's in-memory FS with too many PNGs.
-          const maxTotalFrames = 2600;
-          let transFrames = 24; // 24 frames @ 50fps = ~0.48s per move
-          {
-            const est = (hlen * holdFrames) + ((hlen - 1) * transFrames) + endHoldFrames;
-            if (est > maxTotalFrames) {
-              const budget = maxTotalFrames - (hlen * holdFrames) - endHoldFrames;
-              const per = Math.floor(budget / Math.max(1, hlen - 1));
-              transFrames = clamp(per, 12, transFrames);
-            }
-          }
+          // We want node motion to be constant-speed (px/frame) across the whole extract.
+          // Total duration should scale with (n * number_of_moves), but keep a hard cap to avoid
+          // blowing up ffmpeg.wasm memory (we store all frames before encoding).
+          const FRAMES_PER_MOVE_PER_N = 12; // at 50fps => 0.24s per move when n=1
+          const HARD_MAX_TOTAL_FRAMES = 3200;
+
+          const desiredTransitionFrames = Math.max(0, (hlen - 1) * (state.n || 1) * FRAMES_PER_MOVE_PER_N);
+          const fixedFrames = (hlen * holdFrames) + endHoldFrames;
+          const transitionBudget = clamp(desiredTransitionFrames, (hlen - 1) * 12, Math.max(0, HARD_MAX_TOTAL_FRAMES - fixedFrames));
 
           // Precompute converged layouts for every step.
-          showExportOverlay('Preparing GIF export…', `Computing layouts (${hlen} steps)… (transition frames/move: ${transFrames}, ${fps}fps)`, 0);
+          showExportOverlay('Preparing GIF export…', `Computing layouts (${hlen} steps)…`, 0);
           const pos = new Array(hlen);
           suppressBlueFlash = true;
           for (let i = 0; i < hlen; i++) {
@@ -1642,7 +1639,42 @@
           }
           suppressBlueFlash = false;
 
-          const totalFrames = (hlen * holdFrames) + ((hlen - 1) * transFrames) + endHoldFrames;
+          // Compute per-transition distances (max node displacement), then assign frames per move
+          // so that speed (px/frame) is roughly constant across the whole timeline.
+          const disp = new Array(Math.max(0, hlen - 1)).fill(0);
+          let sumDisp = 0;
+          for (let i = 0; i < hlen - 1; i++) {
+            let md = 0;
+            const A = pos[i], B = pos[i + 1];
+            for (let v = 0; v < k; v++) {
+              const d = Math.hypot(B[v].x - A[v].x, B[v].y - A[v].y);
+              if (d > md) md = d;
+            }
+            disp[i] = md;
+            sumDisp += md;
+          }
+
+          // Choose a global px/frame speed to match the transition frame budget.
+          let pxPerFrame = sumDisp > 0 ? (sumDisp / Math.max(1, transitionBudget)) : 1;
+          const MIN_FRAMES_PER_MOVE = 8;
+          const MAX_FRAMES_PER_MOVE = 90;
+
+          let framesPerMove = disp.map(d => (d <= 0.01) ? 1 : clamp(Math.ceil(d / Math.max(0.001, pxPerFrame)), MIN_FRAMES_PER_MOVE, MAX_FRAMES_PER_MOVE));
+
+          // If clamping pushed us over budget, increase speed and recompute a few times.
+          for (let it = 0; it < 4; it++) {
+            const sumFrames = framesPerMove.reduce((a, b) => a + b, 0);
+            if (sumFrames <= transitionBudget) break;
+            const scale = sumFrames / Math.max(1, transitionBudget);
+            pxPerFrame *= scale;
+            framesPerMove = disp.map(d => (d <= 0.01) ? 1 : clamp(Math.ceil(d / Math.max(0.001, pxPerFrame)), MIN_FRAMES_PER_MOVE, MAX_FRAMES_PER_MOVE));
+          }
+
+          const totalTransitionFrames = framesPerMove.reduce((a, b) => a + b, 0);
+          const totalFrames = fixedFrames + totalTransitionFrames;
+
+          showExportOverlay('Preparing GIF export…', `Layouts ready. Speed≈${pxPerFrame.toFixed(2)} px/frame. Frames=${totalFrames} @ ${fps}fps`, 0.22);
+
           let frameIdx = 0;
 
           async function writeFrame() {
@@ -1667,6 +1699,7 @@
           for (let i = 0; i < hlen - 1; i++) {
             const from = pos[i];
             const to = pos[i + 1];
+            const tf = framesPerMove[i] || 1;
 
             // state updates immediately to step i+1, but we animate positions from old -> new.
             exportNowMs = frameIdx * (1000 / fps);
@@ -1685,12 +1718,12 @@
 
             gotoHistory(state, i + 1);
 
-            for (let f = 1; f <= transFrames; f++) {
-              const t = f / transFrames; // linear => constant speed during transition
+            for (let f = 1; f <= tf; f++) {
+              const t = f / tf; // linear => constant speed during transition (per frame)
               layout = { k, mode: 'force', nodes: lerpNodes(from, to, t), edges, transition: null };
               showExportOverlay('Capturing frames…', `Step ${i + 2}/${hlen} (transition)`, (frameIdx / totalFrames) * 0.55);
               await writeFrame();
-              if (f % 6 === 0) await sleep(0);
+              if (f % 10 === 0) await sleep(0);
             }
 
             layout = { k, mode: 'force', nodes: to.map(p => ({ x: p.x, y: p.y })), edges, transition: null };
