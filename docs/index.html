@@ -427,6 +427,9 @@
             <option value="webm">WebM</option>
             <option value="webp">WebP (animated)</option>
           </select>
+          <label style="display:flex; align-items:center; gap:8px; margin:0; color: var(--muted);">
+            <input id="exportHud" type="checkbox" /> Export HUD
+          </label>
         </div>
         <div class="posHelp">Export uses the same move notation as the Moves list. “Copy Link” writes a URL hash like <code>#k=8&amp;n=2&amp;t=C&amp;l=2&amp;m=0-2~1-5.3-4~</code> which auto-loads on open.</div>
       </div>
@@ -686,6 +689,10 @@
         state.turn = COP;
         state.copMovesLeft = state.n;
       }
+
+      // Small readability pause before any auto player starts the next turn.
+      autoTurnPauseUntilMs = nowMs() + AUTO_TURN_PAUSE_MS;
+      autoTurnPauseScheduled = false;
     }
 
     function pushHistory(state) {
@@ -1090,6 +1097,7 @@
       posCopyLink: document.getElementById('posCopyLink'),
       exportGif: document.getElementById('exportGif'),
       exportFmt: document.getElementById('exportFmt'),
+      exportHud: document.getElementById('exportHud'),
       exportOverlay: document.getElementById('exportOverlay'),
       exportTitle: document.getElementById('exportTitle'),
       exportProgress: document.getElementById('exportProgress'),
@@ -1125,8 +1133,26 @@
     let forceNeedsRelax = false;
     let exportLayoutInstant = false; // during exports: skip smooth transitions; capture stable layouts
     let exportLayoutManual = false;  // during exports: layout.nodes is driven by exporter (don't let ensureLayout override)
+    let exportHudEnabled = false;    // during exports: draw turn/move HUD on the canvas
+
     let autoCopScheduled = false;
     let autoRobberScheduled = false;
+
+    // Tiny pause after each turn switch (AI autoplay readability)
+    const AUTO_TURN_PAUSE_MS = 160;
+    let autoTurnPauseUntilMs = 0;
+    let autoTurnPauseScheduled = false;
+    function scheduleAutoAfterTurnPause() {
+      if (autoTurnPauseScheduled) return;
+      const delay = Math.max(0, autoTurnPauseUntilMs - nowMs());
+      if (delay <= 0) return;
+      autoTurnPauseScheduled = true;
+      setTimeout(() => {
+        autoTurnPauseScheduled = false;
+        // Trigger a draw() so maybeAutoCop/maybeAutoRobber gets re-evaluated.
+        if ((els.autoCop && els.autoCop.checked) || (els.autoRobber && els.autoRobber.checked)) draw();
+      }, delay + 5);
+    }
 
     // View transform for zoom/pan (screen = world * scale + offset)
     let view = { scale: 1, offsetX: 0, offsetY: 0 };
@@ -1162,6 +1188,75 @@
       for (const [k, f] of blueFlash) {
         if (t - f.startMs > f.durMs + 50) blueFlash.delete(k);
       }
+    }
+
+    function lastMoveForHud(state) {
+      const rounds = trimmedMoveRoundsForDisplay(state.moveRounds);
+      for (let i = rounds.length - 1; i >= 0; i--) {
+        const r = rounds[i];
+        if (!r) continue;
+        if (r.robber) return `Last: R ${r.robber.u}-${r.robber.v}`;
+        if (r.cop && r.cop.length) {
+          const e = r.cop[r.cop.length - 1];
+          return `Last: C ${e.u}-${e.v}`;
+        }
+      }
+      return null;
+    }
+
+    function drawExportHudOverlay() {
+      if (!exportHudEnabled) return;
+      if (exportNowMs === null) return; // export-only
+
+      const lines = [];
+      const hlen = (state.history && state.history.length) ? state.history.length : 0;
+      if (hlen) lines.push(`Step ${state.historyIndex}/${Math.max(0, hlen - 1)}`);
+      const turnStr = (state.turn === COP) ? `Turn: Cop (${state.copMovesLeft} left)` : 'Turn: Robber';
+      lines.push(turnStr);
+      const lm = lastMoveForHud(state);
+      if (lm) lines.push(lm);
+      if (state.gameOver) {
+        const w = (state.winner === COP) ? 'Cop' : (state.winner === ROBBER) ? 'Robber' : '—';
+        lines.push(`Winner: ${w}`);
+      }
+
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.font = '700 18px ui-sans-serif, system-ui';
+
+      const pad = 10;
+      let maxW = 0;
+      for (const s of lines) maxW = Math.max(maxW, ctx.measureText(s).width);
+      const lineH = 22;
+      const boxW = Math.ceil(maxW + pad * 2);
+      const boxH = Math.ceil(lines.length * lineH + pad * 2);
+      const x = 14;
+      const y = 12;
+
+      function rrPath(x, y, w, h, r) {
+        const rr = Math.max(0, Math.min(r, Math.min(w, h) * 0.5));
+        ctx.beginPath();
+        ctx.moveTo(x + rr, y);
+        ctx.arcTo(x + w, y, x + w, y + h, rr);
+        ctx.arcTo(x + w, y + h, x, y + h, rr);
+        ctx.arcTo(x, y + h, x, y, rr);
+        ctx.arcTo(x, y, x + w, y, rr);
+        ctx.closePath();
+      }
+
+      ctx.globalAlpha = 0.78;
+      ctx.fillStyle = 'rgba(0,0,0,0.70)';
+      rrPath(x, y, boxW, boxH, 10);
+      ctx.fill();
+
+      ctx.globalAlpha = 0.95;
+      ctx.fillStyle = 'rgba(255,255,255,0.92)';
+      for (let i = 0; i < lines.length; i++) {
+        ctx.fillText(lines[i], x + pad, y + pad + i * lineH);
+      }
+      ctx.restore();
     }
 
     function screenToWorld(x, y) {
@@ -1530,6 +1625,7 @@
         exportBusy = true;
         exportNowMs = 0;
         exportFpsForAnim = null;
+        exportHudEnabled = !!(els.exportHud && els.exportHud.checked);
         suppressBlueFlash = true;
         blueFlash.clear();
         showExportOverlay('Preparing GIF export…', `Timeline (${orig.copView} view)`, null);
@@ -1880,6 +1976,7 @@
         suppressBlueFlash = true;
         exportNowMs = null;
         exportFpsForAnim = null;
+        exportHudEnabled = false;
         blueFlash.clear();
 
         // Restore UI + state
@@ -1920,6 +2017,7 @@
         exportBusy = true;
         exportNowMs = 0;
         exportFpsForAnim = null;
+        exportHudEnabled = !!(els.exportHud && els.exportHud.checked);
         suppressBlueFlash = true;
         blueFlash.clear();
         showExportOverlay('Preparing GIF export…', 'Loading ffmpeg if needed…', null);
@@ -2089,6 +2187,7 @@
         suppressBlueFlash = true;
         exportNowMs = null;
         exportFpsForAnim = null;
+        exportHudEnabled = false;
         blueFlash.clear();
 
         // restore UI
@@ -3716,6 +3815,9 @@
         // Done drawing graph under view transform
         ctx.restore();
 
+        // Optional export HUD (canvas overlay)
+        drawExportHudOverlay();
+
         // Status
         updateStatus();
 
@@ -3894,6 +3996,9 @@
 
       // Done drawing graph under view transform
       ctx.restore();
+
+      // Optional export HUD (canvas overlay)
+      drawExportHudOverlay();
 
       // Status
       updateStatus();
@@ -5512,6 +5617,7 @@
       if (!els.autoCop || !els.autoCop.checked) return;
       if (state.gameOver || state.turn !== COP) return;
       if (layout && layout.transition) return;
+      if (nowMs() < autoTurnPauseUntilMs) { scheduleAutoAfterTurnPause(); return; }
       if (autoCopScheduled) return;
 
       autoCopScheduled = true;
@@ -5569,6 +5675,7 @@
       if (!els.autoRobber || !els.autoRobber.checked) return;
       if (state.gameOver || state.turn !== ROBBER) return;
       if (layout && layout.transition) return; // wait until the current layout animation settles
+      if (nowMs() < autoTurnPauseUntilMs) { scheduleAutoAfterTurnPause(); return; }
       if (autoRobberScheduled) return;
 
       autoRobberScheduled = true;
