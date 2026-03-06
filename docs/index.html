@@ -3691,11 +3691,17 @@
               const sz = cv.sizes[ci];
               const label = cv.labels[ci];
               const fs0 = contractLabelFontPx(label);
-              const fs = Math.max(8, Math.round(fs0 * labelScale));
+              const fs = Math.max(1, Math.round(fs0 * labelScale));
+              const drawLabel = (labelScale > 0.35);
+              const fsDraw = Math.max(8, fs);
               const rBase = contractNodeRadius(sz) * nodeScale;
-              const rLabel = contractMinRadiusForLabel(label, fs, 12);
+              // Only enforce label-fit radius when the label is actually being drawn.
+              // Otherwise merge animations would show a "ghost" node (because the label-fit radius prevents scaling to ~0).
+              const rLabel = drawLabel ? contractMinRadiusForLabel(label, fsDraw, 12) : 0;
               const r = Math.max(rBase, rLabel);
               const is01 = highlight01 && (cv.has0[ci] || cv.has1[ci]);
+
+              if (r < 0.5) continue;
 
               ctx.save();
               ctx.globalAlpha = alpha;
@@ -3726,10 +3732,10 @@
 
               // Label: always show in contraction view.
               // During merge shrink, avoid drawing microscopic text.
-              if (labelScale > 0.35) {
+              if (drawLabel) {
                 ctx.save();
                 ctx.globalAlpha = alpha;
-                ctx.font = `900 ${fs}px ui-sans-serif, system-ui`;
+                ctx.font = `900 ${fsDraw}px ui-sans-serif, system-ui`;
                 ctx.fillStyle = 'rgba(0,0,0,0.78)';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
