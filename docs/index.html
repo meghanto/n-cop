@@ -1383,16 +1383,17 @@
           y: a.y + (B[i].y - a.y) * t,
         }));
 
-        const fps = (orig.copView === 'blue') ? clamp(Math.round(hlen / 14), 4, 18) : 30;
+        const fps = (orig.copView === 'blue') ? clamp(Math.round(hlen / 14), 4, 18) : 50;
         const endHoldSecs = 1.6;
         const endHoldFrames = Math.max(0, Math.round(endHoldSecs * fps));
 
         const paletteGenVF = preserveAlpha
           ? `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen=reserve_transparent=1`
           : `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen`;
+        // Use a stable dither to avoid shimmering/jaggedness in animated GIFs.
         const paletteUseLavfi = preserveAlpha
-          ? `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a:alpha_threshold=128`
-          : `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a`;
+          ? `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5:alpha_threshold=128`
+          : `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5`;
 
         let lastPng = null;
 
@@ -1437,13 +1438,22 @@
           forceNeedsRelax = false;
 
           const holdFrames = 1; // brief pause per position
-          const targetSecs = 16;
-          const targetFrames = Math.max(1, Math.round(targetSecs * fps));
-          const baseFrames = (hlen * holdFrames) + endHoldFrames;
-          const transFrames = clamp(Math.floor((targetFrames - baseFrames) / Math.max(1, hlen - 1)), 1, 12);
+
+          // Smoothness: prefer many in-between frames per move.
+          // Keep an upper bound so we don't blow up ffmpeg's in-memory FS with too many PNGs.
+          const maxTotalFrames = 2600;
+          let transFrames = 24; // 24 frames @ 50fps = ~0.48s per move
+          {
+            const est = (hlen * holdFrames) + ((hlen - 1) * transFrames) + endHoldFrames;
+            if (est > maxTotalFrames) {
+              const budget = maxTotalFrames - (hlen * holdFrames) - endHoldFrames;
+              const per = Math.floor(budget / Math.max(1, hlen - 1));
+              transFrames = clamp(per, 12, transFrames);
+            }
+          }
 
           // Precompute converged layouts for every step.
-          showExportOverlay('Preparing GIF export…', `Computing layouts (${hlen} steps)…`, 0);
+          showExportOverlay('Preparing GIF export…', `Computing layouts (${hlen} steps)… (transition frames/move: ${transFrames}, ${fps}fps)`, 0);
           const pos = new Array(hlen);
           for (let i = 0; i < hlen; i++) {
             gotoHistory(state, i);
@@ -1535,6 +1545,7 @@
             '-i', 'palette.png',
             '-lavfi', paletteUseLavfi,
             '-loop', '0',
+            '-gifflags', '+transdiff+offsetting',
             'out.gif'
           ]);
         } finally {
@@ -1618,9 +1629,10 @@
           ? `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen=reserve_transparent=1`
           : `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen`;
 
+        // Use a stable dither to avoid shimmering/jaggedness in animated GIFs.
         const paletteUseLavfi = preserveAlpha
-          ? `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a:alpha_threshold=128`
-          : `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a`;
+          ? `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5:alpha_threshold=128`
+          : `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5`;
 
         // Clean any prior outputs/frames if present.
         try {
@@ -1735,6 +1747,7 @@
             '-i', 'palette.png',
             '-lavfi', paletteUseLavfi,
             '-loop', '0',
+            '-gifflags', '+transdiff+offsetting',
             'out.gif'
           ]);
         } finally {
