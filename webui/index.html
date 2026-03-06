@@ -419,7 +419,13 @@
           <button id="posImport" type="button">Import</button>
           <button id="posCopy" type="button">Copy</button>
           <button id="posCopyLink" type="button">Copy Link</button>
-          <button id="exportGif" type="button" title="Exports a move-timeline GIF for the current cop view (Shift-click: view-modes demo). Loads ffmpeg.wasm on demand">Export GIF</button>
+          <button id="exportGif" type="button" title="Exports an animation for the current cop view. Shift-click exports the view-modes demo. Loads ffmpeg.wasm on demand">Export</button>
+          <select id="exportFmt" class="miniSelect" title="Export format">
+            <option value="gif" selected>GIF</option>
+            <option value="mp4">MP4</option>
+            <option value="webm">WebM</option>
+            <option value="webp">WebP (animated)</option>
+          </select>
         </div>
         <div class="posHelp">Export uses the same move notation as the Moves list. “Copy Link” writes a URL hash like <code>#k=8&amp;n=2&amp;t=C&amp;l=2&amp;m=0-2~1-5.3-4~</code> which auto-loads on open.</div>
       </div>
@@ -1075,6 +1081,7 @@
       posCopy: document.getElementById('posCopy'),
       posCopyLink: document.getElementById('posCopyLink'),
       exportGif: document.getElementById('exportGif'),
+      exportFmt: document.getElementById('exportFmt'),
       exportOverlay: document.getElementById('exportOverlay'),
       exportTitle: document.getElementById('exportTitle'),
       exportProgress: document.getElementById('exportProgress'),
@@ -1344,6 +1351,124 @@
 
     function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+    function exportFmt() {
+      const v = (els.exportFmt && els.exportFmt.value) ? String(els.exportFmt.value).toLowerCase() : 'gif';
+      if (v === 'gif' || v === 'mp4' || v === 'webm' || v === 'webp') return v;
+      return 'gif';
+    }
+
+    function mimeForExportFmt(fmt) {
+      if (fmt === 'gif') return 'image/gif';
+      if (fmt === 'mp4') return 'video/mp4';
+      if (fmt === 'webm') return 'video/webm';
+      if (fmt === 'webp') return 'image/webp';
+      return 'application/octet-stream';
+    }
+
+    async function encodeFramesToOutput(ffmpeg, { fmt, fps, targetW, preserveAlpha, outName }) {
+      const outFile = outName || `out.${fmt}`;
+
+      // cleanup
+      try { await ffmpeg.deleteFile(outFile); } catch {}
+      try { await ffmpeg.deleteFile('palette.png'); } catch {}
+
+      if (fmt === 'gif') {
+        const paletteGenVF = preserveAlpha
+          ? `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen=reserve_transparent=1`
+          : `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen`;
+        // Use stable dithering to reduce shimmer.
+        const paletteUseLavfi = preserveAlpha
+          ? `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5:alpha_threshold=128`
+          : `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5`;
+
+        await ffmpeg.exec([
+          '-framerate', String(fps),
+          '-i', 'frame%04d.png',
+          '-vf', paletteGenVF,
+          'palette.png'
+        ]);
+        await ffmpeg.exec([
+          '-framerate', String(fps),
+          '-i', 'frame%04d.png',
+          '-i', 'palette.png',
+          '-lavfi', paletteUseLavfi,
+          '-loop', '0',
+          '-gifflags', '+transdiff+offsetting',
+          outFile
+        ]);
+        return outFile;
+      }
+
+      if (fmt === 'webp') {
+        // Animated WebP
+        // Note: WebP supports alpha; preserveAlpha will work as long as frames contain alpha.
+        await ffmpeg.exec([
+          '-framerate', String(fps),
+          '-i', 'frame%04d.png',
+          '-loop', '0',
+          '-c:v', 'libwebp',
+          '-preset', 'picture',
+          '-q:v', '80',
+          outFile
+        ]);
+        return outFile;
+      }
+
+      if (fmt === 'webm') {
+        // WebM (try vp9, then vp8)
+        const pix = preserveAlpha ? 'yuva420p' : 'yuv420p';
+        try {
+          await ffmpeg.exec([
+            '-framerate', String(fps),
+            '-i', 'frame%04d.png',
+            '-c:v', 'libvpx-vp9',
+            '-pix_fmt', pix,
+            '-b:v', '0',
+            '-crf', '33',
+            outFile
+          ]);
+          return outFile;
+        } catch (e) {
+          await ffmpeg.exec([
+            '-framerate', String(fps),
+            '-i', 'frame%04d.png',
+            '-c:v', 'libvpx',
+            '-pix_fmt', pix,
+            '-b:v', '1M',
+            outFile
+          ]);
+          return outFile;
+        }
+      }
+
+      if (fmt === 'mp4') {
+        // MP4 (try H.264, then fallback to MPEG-4 Part 2)
+        try {
+          await ffmpeg.exec([
+            '-framerate', String(fps),
+            '-i', 'frame%04d.png',
+            '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',
+            '-crf', '23',
+            '-movflags', '+faststart',
+            outFile
+          ]);
+          return outFile;
+        } catch (e) {
+          await ffmpeg.exec([
+            '-framerate', String(fps),
+            '-i', 'frame%04d.png',
+            '-c:v', 'mpeg4',
+            '-q:v', '6',
+            outFile
+          ]);
+          return outFile;
+        }
+      }
+
+      throw new Error(`Unsupported export format: ${fmt}`);
+    }
+
     async function canvasToPngU8Scaled(targetW) {
       const srcW = els.canvas.width;
       const srcH = els.canvas.height;
@@ -1565,43 +1690,38 @@
           }
         }
 
-        // Encode GIF
+        const fmt = exportFmt();
+
+        // Encode
         const progHandler = (p) => {
           const r = (p && (p.ratio ?? p.progress)) || 0;
           const mapped = 0.55 + 0.45 * Math.max(0, Math.min(1, r));
-          showExportOverlay('Encoding GIF…', `ffmpeg running… (${Math.round(r * 100)}%)`, mapped);
+          showExportOverlay(`Encoding ${fmt.toUpperCase()}…`, `ffmpeg running… (${Math.round(r * 100)}%)`, mapped);
         };
         ffmpeg.on('progress', progHandler);
 
+        let outFile = `out.${fmt}`;
         try {
-          showExportOverlay('Encoding GIF…', 'Generating palette…', 0.58);
-          await ffmpeg.exec([
-            '-framerate', String(fps),
-            '-i', 'frame%04d.png',
-            '-vf', paletteGenVF,
-            'palette.png'
-          ]);
+          if (fmt === 'gif') showExportOverlay('Encoding GIF…', 'Generating palette…', 0.58);
+          else showExportOverlay(`Encoding ${fmt.toUpperCase()}…`, 'Encoding…', 0.70);
 
-          showExportOverlay('Encoding GIF…', 'Encoding GIF…', 0.75);
-          await ffmpeg.exec([
-            '-framerate', String(fps),
-            '-i', 'frame%04d.png',
-            '-i', 'palette.png',
-            '-lavfi', paletteUseLavfi,
-            '-loop', '0',
-            '-gifflags', '+transdiff+offsetting',
-            'out.gif'
-          ]);
+          outFile = await encodeFramesToOutput(ffmpeg, {
+            fmt,
+            fps,
+            targetW,
+            preserveAlpha,
+            outName: outFile,
+          });
         } finally {
           ffmpeg.off('progress', progHandler);
         }
 
-        showExportOverlay('Encoding GIF…', 'Finalizing…', 0.98);
-        const out = await ffmpeg.readFile('out.gif');
-        const blob = new Blob([out.buffer], { type: 'image/gif' });
-        downloadBlob(blob, `ncop-timeline-${orig.copView}.gif`);
+        showExportOverlay(`Encoding ${fmt.toUpperCase()}…`, 'Finalizing…', 0.98);
+        const out = await ffmpeg.readFile(outFile);
+        const blob = new Blob([out.buffer], { type: mimeForExportFmt(fmt) });
+        downloadBlob(blob, `ncop-timeline-${orig.copView}.${fmt}`);
 
-        showExportOverlay('Done', `Downloaded ncop-timeline-${orig.copView}.gif`, 1);
+        showExportOverlay('Done', `Downloaded ncop-timeline-${orig.copView}.${fmt}`, 1);
         succeeded = true;
         await sleep(400);
       } catch (e) {
@@ -1775,43 +1895,38 @@
           }
         }
 
-        // Encode GIF
+        const fmt = exportFmt();
+
+        // Encode
         const progHandler = (p) => {
           const r = (p && (p.ratio ?? p.progress)) || 0;
           const mapped = 0.60 + 0.40 * Math.max(0, Math.min(1, r));
-          showExportOverlay('Encoding GIF…', `ffmpeg running… (${Math.round(r * 100)}%)`, mapped);
+          showExportOverlay(`Encoding ${fmt.toUpperCase()}…`, `ffmpeg running… (${Math.round(r * 100)}%)`, mapped);
         };
         ffmpeg.on('progress', progHandler);
 
+        let outFile = `out.${fmt}`;
         try {
-          showExportOverlay('Encoding GIF…', 'Generating palette…', 0.62);
-          await ffmpeg.exec([
-            '-framerate', String(fps),
-            '-i', 'frame%04d.png',
-            '-vf', paletteGenVF,
-            'palette.png'
-          ]);
+          if (fmt === 'gif') showExportOverlay('Encoding GIF…', 'Generating palette…', 0.62);
+          else showExportOverlay(`Encoding ${fmt.toUpperCase()}…`, 'Encoding…', 0.75);
 
-          showExportOverlay('Encoding GIF…', 'Encoding GIF…', 0.78);
-          await ffmpeg.exec([
-            '-framerate', String(fps),
-            '-i', 'frame%04d.png',
-            '-i', 'palette.png',
-            '-lavfi', paletteUseLavfi,
-            '-loop', '0',
-            '-gifflags', '+transdiff+offsetting',
-            'out.gif'
-          ]);
+          outFile = await encodeFramesToOutput(ffmpeg, {
+            fmt,
+            fps,
+            targetW,
+            preserveAlpha,
+            outName: outFile,
+          });
         } finally {
           ffmpeg.off('progress', progHandler);
         }
 
-        showExportOverlay('Encoding GIF…', 'Finalizing…', 0.98);
-        const out = await ffmpeg.readFile('out.gif');
-        const blob = new Blob([out.buffer], { type: 'image/gif' });
-        downloadBlob(blob, 'ncop-views.gif');
+        showExportOverlay(`Encoding ${fmt.toUpperCase()}…`, 'Finalizing…', 0.98);
+        const out = await ffmpeg.readFile(outFile);
+        const blob = new Blob([out.buffer], { type: mimeForExportFmt(fmt) });
+        downloadBlob(blob, `ncop-views.${fmt}`);
 
-        showExportOverlay('Done', 'Downloaded ncop-views.gif', 1);
+        showExportOverlay('Done', `Downloaded ncop-views.${fmt}`, 1);
         succeeded = true;
         await sleep(400);
       } catch (e) {
