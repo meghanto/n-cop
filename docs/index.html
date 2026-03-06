@@ -1543,13 +1543,16 @@
 
       if (fmt === 'mp4') {
         // MP4 (try H.264, then fallback to MPEG-4 Part 2)
+        // Note: MP4 is lossy + yuv420p chroma subsampling, which can soften thin colored lines.
         try {
           await ffmpeg.exec([
             '-framerate', String(fps),
             '-i', 'frame%04d.png',
             '-c:v', 'libx264',
+            '-preset', 'slow',
+            '-tune', 'animation',
             '-pix_fmt', 'yuv420p',
-            '-crf', '23',
+            '-crf', '18',
             '-movflags', '+faststart',
             outFile
           ]);
@@ -1559,7 +1562,7 @@
             '-framerate', String(fps),
             '-i', 'frame%04d.png',
             '-c:v', 'mpeg4',
-            '-q:v', '6',
+            '-q:v', '2',
             outFile
           ]);
           return outFile;
@@ -1626,7 +1629,10 @@
         const k = state.k;
         const edges = computeCompleteEdges(k);
 
-        const targetW = 900;
+        const fmt = exportFmt();
+        // Higher capture width for video formats: MP4 is typically viewed full-screen, and 900px wide
+        // looks soft when scaled up.
+        const targetW = (fmt === 'mp4' || fmt === 'webm') ? 1400 : 900;
         const bgMode = (els.bgMode && els.bgMode.value) ? els.bgMode.value : 'dark';
         const preserveAlpha = (bgMode === 'transparent');
 
@@ -1960,7 +1966,6 @@
           }
         }
 
-        const fmt = exportFmt();
 
         // Encode
         const progHandler = (p) => {
@@ -2061,13 +2066,14 @@
         const k = state.k;
         const edges = computeCompleteEdges(k);
 
+        const fmt = exportFmt();
         const fps = 30;
         exportFpsForAnim = fps;
         const holdSecs = 1.1;
         const transSecs = 0.9;
         const holdFrames = Math.max(1, Math.round(holdSecs * fps));
         const transFrames = Math.max(1, Math.round(transSecs * fps));
-        const targetW = 900;
+        const targetW = (fmt === 'mp4' || fmt === 'webm') ? 1400 : 900;
 
         const bgMode = (els.bgMode && els.bgMode.value) ? els.bgMode.value : 'dark';
         const preserveAlpha = (bgMode === 'transparent');
@@ -2171,7 +2177,6 @@
           }
         }
 
-        const fmt = exportFmt();
 
         // Encode
         const progHandler = (p) => {
