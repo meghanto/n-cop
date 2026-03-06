@@ -1088,6 +1088,7 @@
     let forceAnimRunning = false;
     let forceNeedsRelax = false;
     let exportLayoutInstant = false; // during exports: skip smooth transitions; capture stable layouts
+    let exportLayoutManual = false;  // during exports: layout.nodes is driven by exporter (don't let ensureLayout override)
     let autoCopScheduled = false;
     let autoRobberScheduled = false;
 
@@ -1363,6 +1364,15 @@
         const totalFrames = hlen + endHoldFrames;
         const targetW = 900;
 
+        const bgMode = (els.bgMode && els.bgMode.value) ? els.bgMode.value : 'dark';
+        const preserveAlpha = (bgMode === 'transparent');
+        const paletteGenVF = preserveAlpha
+          ? `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen=reserve_transparent=1`
+          : `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen`;
+        const paletteUseLavfi = preserveAlpha
+          ? `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a:alpha_threshold=128`
+          : `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a`;
+
         // Clean any prior outputs/frames if present.
         try {
           const items = await ffmpeg.listDir('/');
@@ -1430,7 +1440,7 @@
           await ffmpeg.exec([
             '-framerate', String(fps),
             '-i', 'frame%04d.png',
-            '-vf', `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen`,
+            '-vf', paletteGenVF,
             'palette.png'
           ]);
 
@@ -1439,7 +1449,7 @@
             '-framerate', String(fps),
             '-i', 'frame%04d.png',
             '-i', 'palette.png',
-            '-lavfi', `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a`,
+            '-lavfi', paletteUseLavfi,
             '-loop', '0',
             'out.gif'
           ]);
@@ -1482,7 +1492,7 @@
     }
 
     async function exportGifDemo() {
-      // Lazy-load ffmpeg only when exporting.
+      // Demo export: cycles through cop view modes with smooth, deterministic interpolation.
       const orig = {
         copView: els.copView.value,
         showNeutral: els.showNeutral.value,
@@ -1502,83 +1512,142 @@
 
         // Stabilize view for capture
         resetView();
-        draw();
 
         const ffmpeg = await ensureFFmpegLoaded();
 
+        const k = state.k;
+        const edges = computeCompleteEdges(k);
+
         const fps = 30;
-        const holdSecs = 1.4;
-        const transSecs = 0.7;
+        const holdSecs = 1.1;
+        const transSecs = 0.9;
+        const holdFrames = Math.max(1, Math.round(holdSecs * fps));
+        const transFrames = Math.max(1, Math.round(transSecs * fps));
         const targetW = 900;
 
-        const modes = ['blue', 'delete', 'robber'];
-        const frames = [];
-        let frameNo = 0;
+        const bgMode = (els.bgMode && els.bgMode.value) ? els.bgMode.value : 'dark';
+        const preserveAlpha = (bgMode === 'transparent');
 
-        async function captureFor(secs) {
-          const count = Math.max(1, Math.round(secs * fps));
-          for (let i = 0; i < count; i++) {
-            draw();
-            frames.push(await canvasToPngU8Scaled(targetW));
-            frameNo++;
-            showExportOverlay('Capturing frames…', `${frameNo} frames`, null);
-            await sleep(1000 / fps);
+        const paletteGenVF = preserveAlpha
+          ? `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen=reserve_transparent=1`
+          : `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen`;
+
+        const paletteUseLavfi = preserveAlpha
+          ? `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a:alpha_threshold=128`
+          : `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a`;
+
+        // Clean any prior outputs/frames if present.
+        try {
+          const items = await ffmpeg.listDir('/');
+          for (const it of items) {
+            if (it && it.name && /^frame\d+\.png$/.test(it.name)) {
+              try { await ffmpeg.deleteFile(it.name); } catch { /* ignore */ }
+            }
           }
-        }
-
-        // Capture initial mode hold
-        showExportOverlay('Capturing frames…', 'Mode: blue', 0);
-        await captureFor(holdSecs);
-
-        for (let mi = 1; mi < modes.length; mi++) {
-          els.copView.value = modes[mi];
-          handleCopViewChange();
-          showExportOverlay('Capturing frames…', `Mode: ${modes[mi]} (transition)`, null);
-          await captureFor(transSecs + holdSecs);
-        }
-
-        // Encode GIF
-        showExportOverlay('Encoding GIF…', 'Writing frames to ffmpeg FS…', 0);
-
-        // Clean any prior outputs if present.
+        } catch { /* ignore */ }
         try { await ffmpeg.deleteFile('out.gif'); } catch {}
         try { await ffmpeg.deleteFile('palette.png'); } catch {}
 
         const pad = (n, w) => String(n).padStart(w, '0');
-        for (let i = 0; i < frames.length; i++) {
-          const name = `frame${pad(i, 4)}.png`;
-          await ffmpeg.writeFile(name, frames[i]);
-          if (i % 10 === 0) {
-            showExportOverlay('Encoding GIF…', `Writing frames (${i + 1}/${frames.length})`, (i + 1) / frames.length * 0.25);
-            await sleep(0);
+        const smoothstep = (t) => t * t * (3 - 2 * t);
+        const lerpNodes = (A, B, t) => A.map((a, i) => ({
+          x: a.x + (B[i].x - a.x) * t,
+          y: a.y + (B[i].y - a.y) * t,
+        }));
+
+        function computeForceNodesForCurrentCopView() {
+          // computeDeletionViewLayoutFromRing() relies on global layout + els.copView.
+          layout = { k, mode: 'force', nodes: computeCircleNodes(k), edges, transition: null };
+          return computeDeletionViewLayoutFromRing();
+        }
+
+        async function writeFrame(idx) {
+          draw();
+          const png = await canvasToPngU8Scaled(targetW);
+          await ffmpeg.writeFile(`frame${pad(idx, 4)}.png`, png);
+        }
+
+        exportLayoutManual = true;
+        exportLayoutInstant = true;
+        forceAnimRunning = false;
+        forceNeedsRelax = false;
+
+        let frameIdx = 0;
+        const totalFrames = (holdFrames) + (transFrames + holdFrames) + (transFrames + holdFrames);
+
+        // Start in blue view (circle)
+        els.copView.value = 'blue';
+        layout = { k, mode: 'circle', nodes: computeCircleNodes(k), edges, transition: null };
+
+        for (let i = 0; i < holdFrames; i++) {
+          showExportOverlay('Capturing frames…', `Mode: blue (${i + 1}/${holdFrames})`, (frameIdx / totalFrames) * 0.60);
+          await writeFrame(frameIdx++);
+          if (i % 6 === 0) await sleep(0);
+        }
+
+        // Transition to delete
+        {
+          const from = layout.nodes.map(p => ({ x: p.x, y: p.y }));
+          els.copView.value = 'delete';
+          const to = computeForceNodesForCurrentCopView();
+          for (let f = 1; f <= transFrames; f++) {
+            const t = smoothstep(f / transFrames);
+            layout = { k, mode: 'force', nodes: lerpNodes(from, to, t), edges, transition: null };
+            showExportOverlay('Capturing frames…', `Transition: blue → delete (${f}/${transFrames})`, (frameIdx / totalFrames) * 0.60);
+            await writeFrame(frameIdx++);
+            if (f % 6 === 0) await sleep(0);
+          }
+          layout = { k, mode: 'force', nodes: to.map(p => ({ x: p.x, y: p.y })), edges, transition: null };
+          for (let i = 0; i < holdFrames; i++) {
+            showExportOverlay('Capturing frames…', `Mode: delete (${i + 1}/${holdFrames})`, (frameIdx / totalFrames) * 0.60);
+            await writeFrame(frameIdx++);
+            if (i % 6 === 0) await sleep(0);
           }
         }
 
+        // Transition to robber
+        {
+          const from = layout.nodes.map(p => ({ x: p.x, y: p.y }));
+          els.copView.value = 'robber';
+          const to = computeForceNodesForCurrentCopView();
+          for (let f = 1; f <= transFrames; f++) {
+            const t = smoothstep(f / transFrames);
+            layout = { k, mode: 'force', nodes: lerpNodes(from, to, t), edges, transition: null };
+            showExportOverlay('Capturing frames…', `Transition: delete → robber (${f}/${transFrames})`, (frameIdx / totalFrames) * 0.60);
+            await writeFrame(frameIdx++);
+            if (f % 6 === 0) await sleep(0);
+          }
+          layout = { k, mode: 'force', nodes: to.map(p => ({ x: p.x, y: p.y })), edges, transition: null };
+          for (let i = 0; i < holdFrames; i++) {
+            showExportOverlay('Capturing frames…', `Mode: robber (${i + 1}/${holdFrames})`, (frameIdx / totalFrames) * 0.60);
+            await writeFrame(frameIdx++);
+            if (i % 6 === 0) await sleep(0);
+          }
+        }
+
+        // Encode GIF
         const progHandler = (p) => {
           const r = (p && (p.ratio ?? p.progress)) || 0;
-          // map exec progress into [0.25,1]
-          const mapped = 0.25 + 0.75 * Math.max(0, Math.min(1, r));
+          const mapped = 0.60 + 0.40 * Math.max(0, Math.min(1, r));
           showExportOverlay('Encoding GIF…', `ffmpeg running… (${Math.round(r * 100)}%)`, mapped);
         };
         ffmpeg.on('progress', progHandler);
 
         try {
-          // palette pass
-          showExportOverlay('Encoding GIF…', 'Generating palette…', 0.25);
+          showExportOverlay('Encoding GIF…', 'Generating palette…', 0.62);
           await ffmpeg.exec([
             '-framerate', String(fps),
             '-i', 'frame%04d.png',
-            '-vf', `fps=${fps},scale=${targetW}:-1:flags=lanczos,palettegen`,
+            '-vf', paletteGenVF,
             'palette.png'
           ]);
 
-          // gif pass
-          showExportOverlay('Encoding GIF…', 'Encoding GIF…', 0.5);
+          showExportOverlay('Encoding GIF…', 'Encoding GIF…', 0.78);
           await ffmpeg.exec([
             '-framerate', String(fps),
             '-i', 'frame%04d.png',
             '-i', 'palette.png',
-            '-lavfi', `fps=${fps},scale=${targetW}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=sierra2_4a`,
+            '-lavfi', paletteUseLavfi,
             '-loop', '0',
             'out.gif'
           ]);
@@ -1596,8 +1665,10 @@
         await sleep(400);
       } catch (e) {
         showExportOverlay('Export failed', (e && e.message) ? e.message : String(e), null);
-        // keep the overlay visible so the user can read the error; Close button will dismiss it.
       } finally {
+        exportLayoutManual = false;
+        exportLayoutInstant = false;
+
         // restore UI
         els.copView.value = orig.copView;
         els.showNeutral.value = orig.showNeutral;
@@ -1607,6 +1678,9 @@
         view.offsetX = orig.view.offsetX;
         view.offsetY = orig.view.offsetY;
         if (els.zoomLabel) els.zoomLabel.textContent = `${Math.round(view.scale * 100)}%`;
+
+        layout = null;
+        forceNeedsRelax = true;
         exportBusy = false;
         if (succeeded) hideExportOverlay();
         handleCopViewChange();
@@ -1871,6 +1945,8 @@
     }
 
     function ensureLayout(k) {
+      if (exportLayoutManual && layout && layout.k === k) return;
+
       const mode = currentLayoutMode();
       const needNew = !layout || layout.k !== k || layout.mode !== mode;
 
