@@ -720,6 +720,13 @@
         pushHistory(state);
         return { ok: true };
       } else {
+        // Contract-view merge animation: capture the pre-move red components.
+        if (els.copView && els.copView.value === 'contract') {
+          pendingContractFrom = computeRedComponents(state);
+        } else {
+          pendingContractFrom = null;
+        }
+
         state.red.add(key);
         recordMove(state, ROBBER, u, v);
         recomputeGameOver(state);
@@ -1106,6 +1113,10 @@
     let hoverEdge = null; // {u,v} or null (always original-vertex endpoints)
     let hoverNode = null; // vertex index or null
     let hoverComp = null; // contracted component index (contract view only)
+
+    // Contract-view merge animation support: when robber adds a red edge that merges components,
+    // we keep the pre-merge component partition around so we can animate into the merge.
+    let pendingContractFrom = null; // { comps, compOf } captured just before a robber move
 
     let forceAnimRunning = false;
     let forceNeedsRelax = false;
@@ -2314,6 +2325,20 @@
       const from = layout.nodes.map(p => ({ x: p.x, y: p.y }));
       const to = computeDeletionViewLayoutFromRing();
 
+      // Contract-view merge animation: if a robber move just merged red components,
+      // keep the pre-merge partition around so we can crossfade/merge smoothly.
+      const copView = (els.copView && els.copView.value) ? els.copView.value : 'blue';
+      let contractAnim = null;
+      if (copView === 'contract' && pendingContractFrom) {
+        const after = computeRedComponents(state);
+        const beforeCount = pendingContractFrom.comps ? pendingContractFrom.comps.length : 0;
+        const afterCount = after.comps ? after.comps.length : 0;
+        if (afterCount > 0 && beforeCount > 0 && afterCount < beforeCount) {
+          contractAnim = { from: pendingContractFrom, to: after };
+        }
+        pendingContractFrom = null;
+      }
+
       let maxD = 0;
       for (let i = 0; i < to.length; i++) {
         const d = Math.hypot(to[i].x - from[i].x, to[i].y - from[i].y);
@@ -2339,6 +2364,7 @@
         to,
         startMs: performance.now(),
         durMs,
+        contractAnim,
       };
 
       if (!forceAnimRunning) {
@@ -2522,10 +2548,9 @@
       return 12 + 7 * Math.sqrt(Math.max(1, sz));
     }
 
-    function buildContractViewData(nodes) {
-      // nodes: per-vertex positions (k entries). We compute red components and treat each as a merged node.
-      const k = state.k;
-      const { comps, compOf } = computeRedComponents(state);
+    function buildContractViewDataFromPartition(nodes, comps, compOf) {
+      // nodes: per-vertex positions (k entries).
+      // comps/compOf: a partition of vertices into contracted nodes.
       const m = comps.length;
 
       const centers = new Array(m);
@@ -2568,6 +2593,12 @@
       }
 
       return { comps, compOf, centers, labels, sizes, has0, has1, edges };
+    }
+
+    function buildContractViewData(nodes) {
+      // We compute red components and treat each as a merged node.
+      const { comps, compOf } = computeRedComponents(state);
+      return buildContractViewDataFromPartition(nodes, comps, compOf);
     }
 
     function draw() {
@@ -2621,78 +2652,194 @@
 
       // --- Contract view (robber contractions + parallel edges) ---------------
       if (copView === 'contract') {
-        const cv = buildContractViewData(nodes);
         const neutralCol = getComputedStyle(document.documentElement).getPropertyValue('--neutral').trim();
         const nodeCol = getComputedStyle(document.documentElement).getPropertyValue('--node').trim();
         const node0Col = getComputedStyle(document.documentElement).getPropertyValue('--node0').trim();
         const redCol = getComputedStyle(document.documentElement).getPropertyValue('--red').trim();
         const blueCol = getComputedStyle(document.documentElement).getPropertyValue('--blue').trim() || '#4da3ff';
 
+        const smoothstep = (t) => t * t * (3 - 2 * t);
+
+        // If a robber move just merged components, crossfade from the pre-merge partition
+        // into the post-merge partition while the layout transition runs.
+        let cvMain = buildContractViewData(nodes);
+        let cvFrom = null;
+        let fade = 1;
+        if (layout && layout.transition && layout.transition.contractAnim) {
+          const tr = layout.transition;
+          const t = clamp((nowMs() - tr.startMs) / Math.max(1, tr.durMs), 0, 1);
+          const raw = clamp((t - 0.35) / 0.65, 0, 1);
+          fade = smoothstep(raw);
+          const fromP = tr.contractAnim.from;
+          const toP = tr.contractAnim.to;
+          cvFrom = buildContractViewDataFromPartition(nodes, fromP.comps, fromP.compOf);
+          cvMain = buildContractViewDataFromPartition(nodes, toP.comps, toP.compOf);
+        }
+
         let hoverEdgeComps = null;
         if (hoverEdge && !state.gameOver) {
-          const a = cv.compOf[hoverEdge.u];
-          const b = cv.compOf[hoverEdge.v];
+          const a = cvMain.compOf[hoverEdge.u];
+          const b = cvMain.compOf[hoverEdge.v];
           if (a >= 0 && b >= 0 && a !== b) hoverEdgeComps = { a: Math.min(a, b), b: Math.max(a, b) };
         }
 
-        // Neutral parallel edges
-        if (showNeutral) {
-          ctx.save();
-          ctx.strokeStyle = neutralCol;
-          ctx.lineWidth = 1.8;
-          for (const e of cv.edges) {
-            const A = cv.centers[e.a];
-            const B = cv.centers[e.b];
-            const hot = (hoverComp !== null && (e.a === hoverComp || e.b === hoverComp)) ||
-              (hoverEdgeComps && e.a === hoverEdgeComps.a && e.b === hoverEdgeComps.b);
-            ctx.globalAlpha = hot ? 0.95 : 0.55;
+        function hasActiveFlashBetweenComps(cv, a, b) {
+          if (!blueFlash.size) return false;
+          const t = nowMs();
+          for (const [_, f] of blueFlash) {
+            const ca = cv.compOf[f.u];
+            const cb = cv.compOf[f.v];
+            if (ca < 0 || cb < 0 || ca === cb) continue;
+            const x = Math.min(ca, cb);
+            const y = Math.max(ca, cb);
+            if (x !== a || y !== b) continue;
+            const age = t - f.startMs;
+            if (age >= 0 && age <= f.durMs) return true;
+          }
+          return false;
+        }
+
+        function renderContract(cv, alpha, withHover) {
+          if (alpha <= 0.001) return;
+
+          // Neutral parallel edges
+          if (showNeutral) {
+            ctx.save();
+            ctx.strokeStyle = neutralCol;
+            ctx.lineWidth = 2.0;
+            for (const e of cv.edges) {
+              const A = cv.centers[e.a];
+              const B = cv.centers[e.b];
+              const hot = withHover && ((hoverComp !== null && (e.a === hoverComp || e.b === hoverComp)) ||
+                (hoverEdgeComps && e.a === hoverEdgeComps.a && e.b === hoverEdgeComps.b));
+              ctx.globalAlpha = alpha * (hot ? 0.98 : 0.62);
+              ctx.beginPath();
+              ctx.moveTo(A.x, A.y);
+              ctx.lineTo(B.x, B.y);
+              ctx.stroke();
+            }
+            ctx.restore();
+
+            // Edge multiplicity labels (N for N parallel remaining edges) — make prominent.
+            ctx.save();
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.font = '700 18px ui-sans-serif, system-ui';
+            for (const e of cv.edges) {
+              if (e.count <= 1) continue;
+              const A = cv.centers[e.a];
+              const B = cv.centers[e.b];
+              const mx0 = (A.x + B.x) * 0.5;
+              const my0 = (A.y + B.y) * 0.5;
+              const dx = B.x - A.x;
+              const dy = B.y - A.y;
+              const len = Math.hypot(dx, dy) + 0.001;
+              const ox = (-dy / len) * 14;
+              const oy = (dx / len) * 14;
+              const mx = mx0 + ox;
+              const my = my0 + oy;
+
+              const text = String(e.count);
+              const r = 15;
+              ctx.globalAlpha = alpha * 0.95;
+              ctx.save();
+              ctx.shadowColor = 'rgba(0,0,0,0.35)';
+              ctx.shadowBlur = 10;
+              ctx.fillStyle = 'rgba(255, 214, 102, 0.95)';
+              ctx.beginPath();
+              ctx.arc(mx, my, r, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.restore();
+
+              ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.arc(mx, my, r, 0, Math.PI * 2);
+              ctx.stroke();
+
+              ctx.fillStyle = 'rgba(0,0,0,0.88)';
+              ctx.fillText(text, mx, my + 0.5);
+            }
+            ctx.restore();
+          }
+
+          // Hover edge highlight (super-edge)
+          if (withHover && hoverEdgeComps && !state.gameOver) {
+            const A = cv.centers[hoverEdgeComps.a];
+            const B = cv.centers[hoverEdgeComps.b];
+            const flashed = hasActiveFlashBetweenComps(cv, hoverEdgeComps.a, hoverEdgeComps.b);
+            ctx.save();
+            ctx.globalAlpha = 0.70;
+            // If a cop-deletion flash is active on this connection, don't show the robber-red hover color.
+            ctx.strokeStyle = flashed ? blueCol : ((state.turn === COP) ? blueCol : redCol);
+            ctx.lineWidth = 6;
+            ctx.setLineDash([8, 6]);
             ctx.beginPath();
             ctx.moveTo(A.x, A.y);
             ctx.lineTo(B.x, B.y);
             ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.restore();
           }
-          ctx.restore();
 
-          // Edge multiplicity labels (N for N parallel remaining edges)
-          ctx.save();
-          const bg = (bgMode === 'light') ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.55)';
-          const fg = (bgMode === 'light') ? 'rgba(0,0,0,0.85)' : 'rgba(255,255,255,0.90)';
-          ctx.font = '12px ui-sans-serif, system-ui';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          for (const e of cv.edges) {
-            if (e.count <= 1) continue;
-            const A = cv.centers[e.a];
-            const B = cv.centers[e.b];
-            const mx = (A.x + B.x) * 0.5;
-            const my = (A.y + B.y) * 0.5;
-            const text = String(e.count);
-            const padX = 6, padY = 3;
-            const tw = ctx.measureText(text).width;
-            const w2 = tw + padX * 2;
-            const h2 = 14 + padY;
-            ctx.fillStyle = bg;
-            ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-            ctx.lineWidth = 1;
+          // Contracted nodes
+          const highlight01 = els.highlight01.checked;
+          for (let ci = 0; ci < cv.comps.length; ci++) {
+            const p = cv.centers[ci];
+            const sz = cv.sizes[ci];
+            const r = contractNodeRadius(sz);
+            const is01 = highlight01 && (cv.has0[ci] || cv.has1[ci]);
+
+            ctx.save();
+            ctx.globalAlpha = alpha;
             ctx.beginPath();
-            const rx = mx - w2 / 2;
-            const ry = my - h2 / 2;
-            const rr = 5;
-            ctx.moveTo(rx + rr, ry);
-            ctx.arcTo(rx + w2, ry, rx + w2, ry + h2, rr);
-            ctx.arcTo(rx + w2, ry + h2, rx, ry + h2, rr);
-            ctx.arcTo(rx, ry + h2, rx, ry, rr);
-            ctx.arcTo(rx, ry, rx + w2, ry, rr);
-            ctx.closePath();
+            ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+            ctx.fillStyle = is01 ? node0Col : nodeCol;
+            ctx.shadowColor = 'rgba(0,0,0,0.4)';
+            ctx.shadowBlur = 12;
             ctx.fill();
+            ctx.shadowBlur = 0;
+
+            // Outline: red if merged (>1), else subtle dark.
+            ctx.lineWidth = (sz > 1) ? 4 : 2;
+            ctx.strokeStyle = (sz > 1) ? redCol : 'rgba(0,0,0,0.45)';
             ctx.stroke();
-            ctx.fillStyle = fg;
-            ctx.fillText(text, mx, my);
+            ctx.restore();
+
+            // Hover ring
+            if (withHover && hoverComp === ci && !state.gameOver) {
+              ctx.save();
+              ctx.beginPath();
+              ctx.arc(p.x, p.y, r + 8, 0, Math.PI * 2);
+              ctx.strokeStyle = 'rgba(255,255,255,0.80)';
+              ctx.lineWidth = 4;
+              ctx.stroke();
+              ctx.restore();
+            }
+
+            // Label: always show in contraction view.
+            ctx.save();
+            ctx.globalAlpha = alpha;
+            const label = cv.labels[ci];
+            const fs = (label.length > 14) ? 9 : (label.length > 10) ? 10 : (label.length > 6) ? 11 : 12;
+            ctx.font = `700 ${fs}px ui-sans-serif, system-ui`;
+            ctx.fillStyle = 'rgba(0,0,0,0.78)';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, p.x, p.y);
+            ctx.restore();
           }
-          ctx.restore();
         }
 
-        // Flash newly-blocked cop edges: draw between component centers.
+        // If we have a merge animation, draw the pre-merge partition first, then crossfade into the post-merge partition.
+        if (cvFrom) {
+          renderContract(cvFrom, 1 - fade, false);
+          renderContract(cvMain, fade, true);
+        } else {
+          renderContract(cvMain, 1, true);
+        }
+
+        // Flash newly-blocked cop edges: draw between component centers (always on top, non-crossfaded).
         if (blueFlash.size) {
           const t = nowMs();
           ctx.save();
@@ -2700,83 +2847,20 @@
           ctx.lineWidth = 7;
           ctx.lineCap = 'round';
           for (const [_, f] of blueFlash) {
-            const ca = cv.compOf[f.u];
-            const cb = cv.compOf[f.v];
+            const ca = cvMain.compOf[f.u];
+            const cb = cvMain.compOf[f.v];
             if (ca < 0 || cb < 0 || ca === cb) continue;
             const age = t - f.startMs;
             if (age < 0) continue;
             const tt = Math.max(0, Math.min(1, age / Math.max(1, f.durMs)));
             ctx.globalAlpha = Math.max(0, 1 - tt);
-            const A = cv.centers[ca];
-            const B = cv.centers[cb];
+            const A = cvMain.centers[ca];
+            const B = cvMain.centers[cb];
             ctx.beginPath();
             ctx.moveTo(A.x, A.y);
             ctx.lineTo(B.x, B.y);
             ctx.stroke();
           }
-          ctx.restore();
-        }
-
-        // Hover edge highlight (super-edge)
-        if (hoverEdgeComps && !state.gameOver) {
-          const A = cv.centers[hoverEdgeComps.a];
-          const B = cv.centers[hoverEdgeComps.b];
-          ctx.save();
-          ctx.globalAlpha = 0.70;
-          ctx.strokeStyle = (state.turn === COP) ? blueCol : redCol;
-          ctx.lineWidth = 6;
-          ctx.setLineDash([8, 6]);
-          ctx.beginPath();
-          ctx.moveTo(A.x, A.y);
-          ctx.lineTo(B.x, B.y);
-          ctx.stroke();
-          ctx.setLineDash([]);
-          ctx.restore();
-        }
-
-        // Contracted nodes
-        const highlight01 = els.highlight01.checked;
-        for (let ci = 0; ci < cv.comps.length; ci++) {
-          const p = cv.centers[ci];
-          const sz = cv.sizes[ci];
-          const r = contractNodeRadius(sz);
-          const is01 = highlight01 && (cv.has0[ci] || cv.has1[ci]);
-
-          ctx.save();
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-          ctx.fillStyle = is01 ? node0Col : nodeCol;
-          ctx.shadowColor = 'rgba(0,0,0,0.4)';
-          ctx.shadowBlur = 12;
-          ctx.fill();
-          ctx.shadowBlur = 0;
-
-          // Outline: red if merged (>1), else subtle dark.
-          ctx.lineWidth = (sz > 1) ? 4 : 2;
-          ctx.strokeStyle = (sz > 1) ? redCol : 'rgba(0,0,0,0.45)';
-          ctx.stroke();
-          ctx.restore();
-
-          // Hover ring
-          if (hoverComp === ci && !state.gameOver) {
-            ctx.save();
-            ctx.beginPath();
-            ctx.arc(p.x, p.y, r + 8, 0, Math.PI * 2);
-            ctx.strokeStyle = 'rgba(255,255,255,0.80)';
-            ctx.lineWidth = 4;
-            ctx.stroke();
-            ctx.restore();
-          }
-
-          // Label: always show in contraction view.
-          ctx.save();
-          const label = cv.labels[ci];
-          const fs = (label.length > 10) ? 9 : (label.length > 6) ? 10 : 12;
-          ctx.font = `${fs}px ui-sans-serif, system-ui`;
-          ctx.fillStyle = 'rgba(0,0,0,0.75)';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(label, p.x, p.y);
           ctx.restore();
         }
 
@@ -4823,6 +4907,14 @@
       if (state.gameOver) return;
       const p = canvasToLocal(evt);
       const w = screenToWorld(p.x, p.y);
+
+      const copView = (els.copView && els.copView.value) ? els.copView.value : 'blue';
+      if (copView === 'contract' && layout && layout.transition && layout.transition.contractAnim) {
+        const tr = layout.transition;
+        const t = clamp((nowMs() - tr.startMs) / Math.max(1, tr.durMs), 0, 1);
+        if (t < 1) return;
+      }
+
       const e = pickEdge(w.x, w.y);
       if (!e) return;
 
@@ -4860,10 +4952,26 @@
       let nextHoverEdge = null;
 
       if (copView === 'contract') {
-        nextHoverComp = pickContractComp(w.x, w.y);
-        if (nextHoverComp === null) {
-          const e = pickContractEdge(w.x, w.y);
-          nextHoverEdge = e ? { u: e.u, v: e.v } : null;
+        // During a merge animation (robber contraction), suppress hover to avoid visual/pick mismatch.
+        if (layout && layout.transition && layout.transition.contractAnim) {
+          const tr = layout.transition;
+          const t = clamp((nowMs() - tr.startMs) / Math.max(1, tr.durMs), 0, 1);
+          if (t < 1) {
+            nextHoverComp = null;
+            nextHoverEdge = null;
+          } else {
+            nextHoverComp = pickContractComp(w.x, w.y);
+            if (nextHoverComp === null) {
+              const e = pickContractEdge(w.x, w.y);
+              nextHoverEdge = e ? { u: e.u, v: e.v } : null;
+            }
+          }
+        } else {
+          nextHoverComp = pickContractComp(w.x, w.y);
+          if (nextHoverComp === null) {
+            const e = pickContractEdge(w.x, w.y);
+            nextHoverEdge = e ? { u: e.u, v: e.v } : null;
+          }
         }
       } else {
         nextHoverNode = pickNodeUsingLayout(w.x, w.y, layout.nodes);
