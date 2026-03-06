@@ -2570,6 +2570,57 @@
       return best;
     }
 
+    function metaballPath(p1, r1, p2, r2, v, handleLenRate = 2.4, maxDistance = null) {
+      // Returns null if no reasonable connection. Otherwise returns
+      // { p1a, p1b, p2a, p2b, h1a, h2a, h2b, h1b } for drawing a closed metaball path.
+      r1 = Math.max(0.1, r1);
+      r2 = Math.max(0.1, r2);
+
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      const d = Math.hypot(dx, dy);
+
+      const maxD = (maxDistance !== null && maxDistance !== undefined) ? maxDistance : (r1 + r2) * 2.8;
+      if (d > maxD) return null;
+      if (d <= Math.abs(r1 - r2)) return null;
+      if (d < 0.001) return null;
+
+      const angleBetween = Math.atan2(dy, dx);
+      let u1 = 0;
+      let u2 = 0;
+      if (d < r1 + r2) {
+        // Overlapping circles
+        u1 = Math.acos(clamp((r1 * r1 + d * d - r2 * r2) / (2 * r1 * d), -1, 1));
+        u2 = Math.acos(clamp((r2 * r2 + d * d - r1 * r1) / (2 * r2 * d), -1, 1));
+      }
+
+      // The v parameter controls how "blobby" the connection is.
+      const angle1 = angleBetween + u1 + (Math.PI / 2 - u1) * v;
+      const angle2 = angleBetween - u1 - (Math.PI / 2 - u1) * v;
+      const angle3 = angleBetween + Math.PI - u2 - (Math.PI / 2 - u2) * v;
+      const angle4 = angleBetween + Math.PI + u2 + (Math.PI / 2 - u2) * v;
+
+      const p1a = { x: p1.x + r1 * Math.cos(angle1), y: p1.y + r1 * Math.sin(angle1) };
+      const p1b = { x: p1.x + r1 * Math.cos(angle2), y: p1.y + r1 * Math.sin(angle2) };
+      const p2a = { x: p2.x + r2 * Math.cos(angle3), y: p2.y + r2 * Math.sin(angle3) };
+      const p2b = { x: p2.x + r2 * Math.cos(angle4), y: p2.y + r2 * Math.sin(angle4) };
+
+      // Handle lengths: depend on distance and radii.
+      const totalRadius = r1 + r2;
+      const d2 = Math.min(v * handleLenRate, Math.hypot(p1a.x - p2a.x, p1a.y - p2a.y) / totalRadius);
+      const h = Math.min(1, (d * 2) / totalRadius);
+
+      const h1 = r1 * d2 * h;
+      const h2 = r2 * d2 * h;
+
+      const h1a = { x: p1a.x + h1 * Math.cos(angle1 - Math.PI / 2), y: p1a.y + h1 * Math.sin(angle1 - Math.PI / 2) };
+      const h2a = { x: p2a.x + h2 * Math.cos(angle3 + Math.PI / 2), y: p2a.y + h2 * Math.sin(angle3 + Math.PI / 2) };
+      const h2b = { x: p2b.x + h2 * Math.cos(angle4 - Math.PI / 2), y: p2b.y + h2 * Math.sin(angle4 - Math.PI / 2) };
+      const h1b = { x: p1b.x + h1 * Math.cos(angle2 + Math.PI / 2), y: p1b.y + h1 * Math.sin(angle2 + Math.PI / 2) };
+
+      return { p1a, p1b, p2a, p2b, h1a, h2a, h2b, h1b };
+    }
+
     function contractNodeRadius(sz) {
       // Bigger merged nodes so contractions read clearly.
       return 18 + 10 * Math.sqrt(Math.max(1, sz));
@@ -2652,8 +2703,7 @@
         }
       }
 
-      const BASE = 28;
-      const MAX_OFF = 2.2;
+      const MAX_OFF = 2.8;
       const curves = new Array(cv.edges.length);
       for (let ei = 0; ei < cv.edges.length; ei++) {
         const e = cv.edges[ei];
@@ -2670,6 +2720,10 @@
         let off = oa - ob;
         if (inc[e.a].length <= 1 && inc[e.b].length <= 1) off = 0;
         off = clamp(off, -MAX_OFF, MAX_OFF);
+
+        const rA = contractNodeRadius(cv.sizes[e.a] || 1);
+        const rB = contractNodeRadius(cv.sizes[e.b] || 1);
+        const BASE = 10 + 0.55 * (rA + rB);
 
         const mx = (A.x + B.x) * 0.5;
         const my = (A.y + B.y) * 0.5;
@@ -2746,13 +2800,38 @@
         let cvMain = buildContractViewData(nodes);
         let cvFrom = null;
         let mergeT = 1;
+        let metaballT = 0;
+        let mergePairs = null; // [{a,b}] in cvFrom component indices
+
+        function computeMergePairs(fromP, toP) {
+          const groups = new Map(); // newComp -> oldComp[]
+          for (let i = 0; i < fromP.comps.length; i++) {
+            const verts = fromP.comps[i];
+            if (!verts || !verts.length) continue;
+            const nc = toP.compOf[verts[0]];
+            if (nc < 0) continue;
+            if (!groups.has(nc)) groups.set(nc, []);
+            groups.get(nc).push(i);
+          }
+          const out = [];
+          for (const arr of groups.values()) {
+            if (arr.length >= 2) {
+              // One robber edge should merge exactly 2 components, but keep it robust.
+              out.push({ a: arr[0], b: arr[1] });
+            }
+          }
+          return out.length ? out : null;
+        }
+
         if (layout && layout.transition && layout.transition.contractAnim) {
           const tr = layout.transition;
           const t = clamp((nowMs() - tr.startMs) / Math.max(1, tr.durMs), 0, 1);
           // Only start the "merge" sizing in the final part so you see the collision first.
           mergeT = smoothstep(clamp((t - 0.72) / 0.28, 0, 1));
+          metaballT = smoothstep(clamp((t - 0.52) / 0.48, 0, 1));
           const fromP = tr.contractAnim.from;
           const toP = tr.contractAnim.to;
+          mergePairs = computeMergePairs(fromP, toP);
           cvFrom = buildContractViewDataFromPartition(nodes, fromP.comps, fromP.compOf);
           cvMain = buildContractViewDataFromPartition(nodes, toP.comps, toP.compOf);
         }
@@ -2787,6 +2866,8 @@
           const drawNodes = (opts.drawNodes !== undefined) ? opts.drawNodes : true;
           const nodeScale = (opts.nodeScale !== undefined) ? opts.nodeScale : 1;
           const labelScale = (opts.labelScale !== undefined) ? opts.labelScale : nodeScale;
+          const metaballs = opts.metaballs || null; // [{a,b}] in this cv's component indices
+          const metaballTLocal = (opts.metaballT !== undefined) ? opts.metaballT : 0;
 
           // We'll render pills *after* hover highlights so dashed lines appear under the pill.
           const pills = [];
@@ -2945,6 +3026,42 @@
           }
 
           if (drawNodes) {
+            // Metaball merge effect (only during merge animations)
+            if (metaballs && metaballs.length && metaballTLocal > 0.001) {
+              for (const mb of metaballs) {
+                const a = mb.a, b = mb.b;
+                if (a == null || b == null) continue;
+                if (!cv.centers[a] || !cv.centers[b]) continue;
+                const p1 = cv.centers[a];
+                const p2 = cv.centers[b];
+                const r1 = contractNodeRadius(cv.sizes[a] || 1) * nodeScale;
+                const r2 = contractNodeRadius(cv.sizes[b] || 1) * nodeScale;
+
+                // Strength grows as they get closer and as metaballTLocal advances.
+                const d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+                const maxD = (r1 + r2) * 2.4;
+                const closeness = clamp(1 - d / Math.max(1, maxD), 0, 1);
+                const v = clamp(0.15 + 0.85 * (closeness * metaballTLocal), 0, 1);
+
+                const path = metaballPath(p1, r1, p2, r2, v, 2.6, maxD);
+                if (!path) continue;
+
+                ctx.save();
+                ctx.globalAlpha = alpha * 0.92;
+                ctx.fillStyle = nodeCol;
+                ctx.shadowColor = 'rgba(0,0,0,0.35)';
+                ctx.shadowBlur = 10;
+                ctx.beginPath();
+                ctx.moveTo(path.p1a.x, path.p1a.y);
+                ctx.bezierCurveTo(path.h1a.x, path.h1a.y, path.h2a.x, path.h2a.y, path.p2a.x, path.p2a.y);
+                ctx.lineTo(path.p2b.x, path.p2b.y);
+                ctx.bezierCurveTo(path.h2b.x, path.h2b.y, path.h1b.x, path.h1b.y, path.p1b.x, path.p1b.y);
+                ctx.closePath();
+                ctx.fill();
+                ctx.restore();
+              }
+            }
+
             // Contracted nodes
             const highlight01 = els.highlight01.checked;
             for (let ci = 0; ci < cv.comps.length; ci++) {
@@ -3005,7 +3122,15 @@
           const sTo = mergeT;
           const sFrom = 1 - mergeT;
           // Pre-merge view (full graph) while nodes collide.
-          renderContract(cvFrom, 1, false, { nodeScale: sFrom, labelScale: sFrom, drawEdges: true, drawPills: true, drawNodes: true });
+          renderContract(cvFrom, 1, false, {
+            nodeScale: sFrom,
+            labelScale: sFrom,
+            drawEdges: true,
+            drawPills: true,
+            drawNodes: true,
+            metaballs: mergePairs,
+            metaballT,
+          });
           // Post-merge node grows in (edges/pills appear only at the very end to avoid confusing topology mid-merge).
           renderContract(cvMain, 1, true, { nodeScale: sTo, labelScale: sTo, drawEdges: (mergeT > 0.92), drawPills: (mergeT > 0.92), drawNodes: true });
         } else {
