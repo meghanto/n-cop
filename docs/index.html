@@ -689,10 +689,6 @@
         state.turn = COP;
         state.copMovesLeft = state.n;
       }
-
-      // Small readability pause before any auto player starts the next turn.
-      autoTurnPauseUntilMs = nowMs() + AUTO_TURN_PAUSE_MS;
-      autoTurnPauseScheduled = false;
     }
 
     function pushHistory(state) {
@@ -1138,21 +1134,6 @@
     let autoCopScheduled = false;
     let autoRobberScheduled = false;
 
-    // Tiny pause after each turn switch (AI autoplay readability)
-    const AUTO_TURN_PAUSE_MS = 160;
-    let autoTurnPauseUntilMs = 0;
-    let autoTurnPauseScheduled = false;
-    function scheduleAutoAfterTurnPause() {
-      if (autoTurnPauseScheduled) return;
-      const delay = Math.max(0, autoTurnPauseUntilMs - nowMs());
-      if (delay <= 0) return;
-      autoTurnPauseScheduled = true;
-      setTimeout(() => {
-        autoTurnPauseScheduled = false;
-        // Trigger a draw() so maybeAutoCop/maybeAutoRobber gets re-evaluated.
-        if ((els.autoCop && els.autoCop.checked) || (els.autoRobber && els.autoRobber.checked)) draw();
-      }, delay + 5);
-    }
 
     // View transform for zoom/pan (screen = world * scale + offset)
     let view = { scale: 1, offsetX: 0, offsetY: 0 };
@@ -1685,11 +1666,26 @@
 
         // --- Mode A: blue view (no force animation) --------------------------
         if (orig.copView === 'blue') {
-          const totalFrames = hlen + endHoldFrames;
+          // Pause briefly after each robber move so the viewer can register the position
+          // before the next cop turn begins.
+          const ROBBER_SOAK_SECS = 0.10; // ~5 frames at 50fps
+          const soakFrames = Math.max(1, Math.round(ROBBER_SOAK_SECS * fps));
+
+          let robberSteps = 0;
+          for (let i = 1; i < hlen; i++) {
+            const prevSnap = state.history[i - 1];
+            const curSnap = state.history[i];
+            const prevR = (prevSnap && prevSnap.red) ? prevSnap.red.size : 0;
+            const curR = (curSnap && curSnap.red) ? curSnap.red.size : 0;
+            if (curR > prevR) robberSteps++;
+          }
+
+          const totalFrames = hlen + robberSteps * soakFrames + endHoldFrames;
           exportLayoutInstant = true;
 
+          let frameIdx = 0;
           for (let i = 0; i < hlen; i++) {
-            exportNowMs = i * (1000 / fps);
+            exportNowMs = frameIdx * (1000 / fps);
             gotoHistory(state, i);
             hoverEdge = null;
             hoverNode = null;
@@ -1699,10 +1695,25 @@
 
             const png = await canvasToPngU8Scaled(targetW);
             lastPng = png.slice();
-            await ffmpeg.writeFile(`frame${pad(i, 4)}.png`, png);
+            await ffmpeg.writeFile(`frame${pad(frameIdx, 4)}.png`, png);
+            frameIdx++;
+
+            // Extra pause frames after robber move
+            if (i > 0) {
+              const prevSnap = state.history[i - 1];
+              const curSnap = state.history[i];
+              const prevR = (prevSnap && prevSnap.red) ? prevSnap.red.size : 0;
+              const curR = (curSnap && curSnap.red) ? curSnap.red.size : 0;
+              if (curR > prevR && lastPng) {
+                for (let j = 0; j < soakFrames; j++) {
+                  await ffmpeg.writeFile(`frame${pad(frameIdx, 4)}.png`, lastPng.slice());
+                  frameIdx++;
+                }
+              }
+            }
 
             if (i % 2 === 0) {
-              const frac = (i + 1) / Math.max(1, totalFrames);
+              const frac = frameIdx / Math.max(1, totalFrames);
               showExportOverlay('Capturing frames…', `Step ${i + 1}/${hlen} @ ${fps} fps`, frac * 0.55);
               await sleep(0);
             }
@@ -1710,8 +1721,8 @@
 
           if (lastPng && endHoldFrames > 0) {
             for (let j = 0; j < endHoldFrames; j++) {
-              const idx = hlen + j;
-              await ffmpeg.writeFile(`frame${pad(idx, 4)}.png`, lastPng.slice());
+              await ffmpeg.writeFile(`frame${pad(frameIdx, 4)}.png`, lastPng.slice());
+              frameIdx++;
             }
           }
         } else {
@@ -1729,25 +1740,41 @@
           // - keep robber merges from dominating the timeline
           const HOLD_BASE = 1;                  // base pause per position
           const HOLD_EXTRA_PER_COP_EDGE = 10;   // extra pause after each newly-blocked cop edge
+          const HOLD_AFTER_ROBBER_TURN = 5;     // short soak after robber move before cop starts
           const COP_BLOCK_MIN_TRANS_FRAMES = 14;
           const MERGE_TRANS_FRAMES_MIN = 10;
           const MERGE_TRANS_FRAMES_MAX = 20;
 
           const holdAtStep = new Array(hlen).fill(HOLD_BASE);
           const addedBlueCount = new Array(Math.max(0, hlen - 1)).fill(0);
+          const addedRedCount = new Array(Math.max(0, hlen - 1)).fill(0);
           for (let i = 0; i < hlen - 1; i++) {
             const prevSnap = state.history[i];
             const nextSnap = state.history[i + 1];
-            let add = 0;
+
+            // Cop deletions (blue)
+            let addB = 0;
             if (prevSnap && nextSnap && nextSnap.blue) {
               for (const key of nextSnap.blue) {
-                if (!prevSnap.blue || !prevSnap.blue.has(key)) add++;
+                if (!prevSnap.blue || !prevSnap.blue.has(key)) addB++;
               }
             }
-            addedBlueCount[i] = add;
-            if (add > 0) {
+            addedBlueCount[i] = addB;
+            if (addB > 0) {
               // Cap extra hold so huge pasted positions don't explode frame count.
-              holdAtStep[i + 1] += Math.min(22, HOLD_EXTRA_PER_COP_EDGE * add);
+              holdAtStep[i + 1] += Math.min(22, HOLD_EXTRA_PER_COP_EDGE * addB);
+            }
+
+            // Robber moves (red): pause a bit after robber turn so the viewer can "soak" the state.
+            let addR = 0;
+            if (prevSnap && nextSnap && nextSnap.red) {
+              for (const key of nextSnap.red) {
+                if (!prevSnap.red || !prevSnap.red.has(key)) addR++;
+              }
+            }
+            addedRedCount[i] = addR;
+            if (addR > 0) {
+              holdAtStep[i + 1] += HOLD_AFTER_ROBBER_TURN;
             }
           }
 
@@ -5617,7 +5644,6 @@
       if (!els.autoCop || !els.autoCop.checked) return;
       if (state.gameOver || state.turn !== COP) return;
       if (layout && layout.transition) return;
-      if (nowMs() < autoTurnPauseUntilMs) { scheduleAutoAfterTurnPause(); return; }
       if (autoCopScheduled) return;
 
       autoCopScheduled = true;
@@ -5675,7 +5701,6 @@
       if (!els.autoRobber || !els.autoRobber.checked) return;
       if (state.gameOver || state.turn !== ROBBER) return;
       if (layout && layout.transition) return; // wait until the current layout animation settles
-      if (nowMs() < autoTurnPauseUntilMs) { scheduleAutoAfterTurnPause(); return; }
       if (autoRobberScheduled) return;
 
       autoRobberScheduled = true;
