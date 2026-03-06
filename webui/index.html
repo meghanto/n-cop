@@ -2338,6 +2338,10 @@
         const afterCount = after.comps ? after.comps.length : 0;
         if (afterCount > 0 && beforeCount > 0 && afterCount < beforeCount) {
           contractAnim = { from: pendingContractFrom, to: after };
+          // Prevent stale hover state from drawing "ghost" hover edges during the merge.
+          hoverEdge = null;
+          hoverComp = null;
+          hoverNode = null;
         }
         pendingContractFrom = null;
       }
@@ -3354,7 +3358,8 @@
           }
 
           // Post-merge node grows in (edges/pills appear only at the very end to avoid confusing topology mid-merge).
-          renderContract(cvMain, 1, true, { nodeScale: sTo, labelScale: sTo, drawEdges: (mergeT > 0.92), drawPills: (mergeT > 0.92), drawNodes: true });
+          // Suppress hover during the merge to avoid stale hover state drawing a blue "ghost" edge.
+          renderContract(cvMain, 1, false, { nodeScale: sTo, labelScale: sTo, drawEdges: (mergeT > 0.92), drawPills: (mergeT > 0.92), drawNodes: true });
         } else {
           renderContract(cvMain, 1, true);
         }
