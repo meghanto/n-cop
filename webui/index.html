@@ -2738,12 +2738,21 @@
               const ux = dx / len;
               const uy = dy / len;
 
-              const hot = withHover && ((hoverComp !== null && (e.a === hoverComp || e.b === hoverComp)) ||
-                (hoverEdgeComps && e.a === hoverEdgeComps.a && e.b === hoverEdgeComps.b));
+              const hotNode = withHover && (hoverComp !== null) && (e.a === hoverComp || e.b === hoverComp);
+              const hotEdge = withHover && hoverEdgeComps && (e.a === hoverEdgeComps.a && e.b === hoverEdgeComps.b);
+              const hot = hotNode || hotEdge;
+
+              let glowCol = null;
+              if (hotEdge) {
+                const flashed = hasActiveFlashBetweenComps(cv, e.a, e.b);
+                glowCol = flashed ? blueCol : ((state.turn === COP) ? blueCol : redCol);
+              } else if (hotNode) {
+                glowCol = 'rgba(255,255,255,0.95)';
+              }
 
               const cnt = e.count || 1;
-              const lw = clamp(1.9 + 0.9 * Math.log2(cnt), 1.9, 5.2);
-              ctx.lineWidth = lw;
+              const lwBase = clamp(1.9 + 0.9 * Math.log2(cnt), 1.9, 5.2);
+              ctx.lineWidth = hot ? (lwBase + 0.9) : lwBase;
               ctx.globalAlpha = alpha * (hot ? 0.98 : 0.62);
 
               // If cnt>1, cut out a small gap in the edge for an embedded label.
@@ -2751,14 +2760,23 @@
               let pillW = 0;
               let pillH = 0;
               const text = String(cnt);
+              const pillScale = hotEdge ? 1.30 : hotNode ? 1.18 : 1.0;
+
               if (cnt > 1) {
+                const fontPx = (hot ? 24 : 20);
+                ctx.font = `900 ${fontPx}px ui-sans-serif, system-ui`;
                 const tw = ctx.measureText(text).width;
-                const padX = 14;
-                pillW = tw + padX * 2;
-                pillH = 28;
+
+                const padX = 14 * pillScale;
+                pillH = 28 * pillScale;
+                pillW = (tw + padX * 2);
+
                 // Cut out enough of the line so the (horizontal) pill doesn't overlap the stroke.
                 const halfDiag = Math.hypot(pillW * 0.5, pillH * 0.5);
-                gap = Math.min((halfDiag + 10), len * 0.38);
+                gap = Math.min((halfDiag + 12), len * 0.40);
+              } else {
+                // restore font for measureText consistency across edges
+                ctx.font = '900 20px ui-sans-serif, system-ui';
               }
 
               ctx.beginPath();
@@ -2792,12 +2810,24 @@
                 ctx.fillStyle = labelFill;
                 ctx.fill();
 
+                if (glowCol) {
+                  ctx.save();
+                  ctx.shadowColor = glowCol;
+                  ctx.shadowBlur = hotEdge ? 24 : 18;
+                  ctx.strokeStyle = glowCol;
+                  ctx.lineWidth = 6;
+                  roundedRectPath(-pillW / 2, -pillH / 2, pillW, pillH, pillH / 2);
+                  ctx.stroke();
+                  ctx.restore();
+                }
+
                 ctx.strokeStyle = neutralCol;
-                ctx.lineWidth = 2.6;
+                ctx.lineWidth = 3.2;
+                roundedRectPath(-pillW / 2, -pillH / 2, pillW, pillH, pillH / 2);
                 ctx.stroke();
 
                 ctx.fillStyle = labelFg;
-                ctx.fillText(text, 0, 0.8);
+                ctx.fillText(text, 0, 1.0);
                 ctx.restore();
               }
             }
