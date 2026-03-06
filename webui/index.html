@@ -1390,7 +1390,9 @@
           draw();
 
           const png = await canvasToPngU8Scaled(targetW);
-          lastPng = png;
+          // ffmpeg.writeFile() may transfer (detach) the passed ArrayBuffer,
+          // so keep a separate copy for any later reuse (e.g., end-hold).
+          lastPng = png.slice();
           const name = `frame${pad(i, 4)}.png`;
           await ffmpeg.writeFile(name, png);
 
@@ -1406,7 +1408,7 @@
           for (let j = 0; j < endHoldFrames; j++) {
             const idx = hlen + j;
             const name = `frame${pad(idx, 4)}.png`;
-            await ffmpeg.writeFile(name, lastPng);
+            await ffmpeg.writeFile(name, lastPng.slice());
             if (j % 4 === 0) {
               const frac = (hlen + j + 1) / Math.max(1, totalFrames);
               showExportOverlay('Capturing frames…', `Hold final (${j + 1}/${endHoldFrames})`, frac * 0.55);
