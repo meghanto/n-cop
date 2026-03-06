@@ -1138,7 +1138,7 @@
     let exportFpsForAnim = null; // during exports: used to convert "N frames" -> ms
     function nowMs() { return (exportNowMs !== null) ? exportNowMs : performance.now(); }
 
-    const BLUE_FLASH_FRAMES_EXPORT = 15; // constant number of frames to show a deleted cop edge during exports
+    const BLUE_FLASH_FRAMES_EXPORT = 28; // constant number of frames to show a deleted cop edge during exports (long enough to read individually)
 
     // Flash newly-blocked cop edges in deletions/robber views so the user can see what changed.
     // Map edgeKey -> { u, v, startMs, durMs }
@@ -1628,7 +1628,32 @@
           forceAnimRunning = false;
           forceNeedsRelax = false;
 
-          const holdFrames = 1; // brief pause per position
+          // Timing tweaks for exports:
+          // - give cop edge deletions enough time to read individually
+          // - keep robber merges from dominating the timeline
+          const HOLD_BASE = 1;                  // base pause per position
+          const HOLD_EXTRA_PER_COP_EDGE = 10;   // extra pause after each newly-blocked cop edge
+          const COP_BLOCK_MIN_TRANS_FRAMES = 14;
+          const MERGE_TRANS_FRAMES_MIN = 10;
+          const MERGE_TRANS_FRAMES_MAX = 20;
+
+          const holdAtStep = new Array(hlen).fill(HOLD_BASE);
+          const addedBlueCount = new Array(Math.max(0, hlen - 1)).fill(0);
+          for (let i = 0; i < hlen - 1; i++) {
+            const prevSnap = state.history[i];
+            const nextSnap = state.history[i + 1];
+            let add = 0;
+            if (prevSnap && nextSnap && nextSnap.blue) {
+              for (const key of nextSnap.blue) {
+                if (!prevSnap.blue || !prevSnap.blue.has(key)) add++;
+              }
+            }
+            addedBlueCount[i] = add;
+            if (add > 0) {
+              // Cap extra hold so huge pasted positions don't explode frame count.
+              holdAtStep[i + 1] += Math.min(22, HOLD_EXTRA_PER_COP_EDGE * add);
+            }
+          }
 
           // We want node motion to be constant-speed (px/frame) across the whole extract.
           // Total duration should scale with (n * number_of_moves), but keep a hard cap to avoid
@@ -1637,7 +1662,7 @@
           const HARD_MAX_TOTAL_FRAMES = 9000;
 
           const desiredTransitionFrames = Math.max(0, (hlen - 1) * (state.n || 1) * FRAMES_PER_MOVE_PER_N);
-          const fixedFrames = (hlen * holdFrames) + endHoldFrames;
+          const fixedFrames = holdAtStep.reduce((s, x) => s + x, 0) + endHoldFrames;
           const transitionBudget = clamp(desiredTransitionFrames, (hlen - 1) * 18, Math.max(0, HARD_MAX_TOTAL_FRAMES - fixedFrames));
 
           // Precompute converged layouts for every step.
@@ -1657,6 +1682,18 @@
           }
           suppressBlueFlash = false;
 
+          // Detect robber merges (contract view): component count decreases from step i -> i+1.
+          const isMerge = new Array(Math.max(0, hlen - 1)).fill(false);
+          if (part) {
+            for (let i = 0; i < hlen - 1; i++) {
+              const b = part[i];
+              const a = part[i + 1];
+              const bc = (b && b.comps) ? b.comps.length : 0;
+              const ac = (a && a.comps) ? a.comps.length : 0;
+              if (ac > 0 && bc > 0 && ac < bc) isMerge[i] = true;
+            }
+          }
+
           // Compute per-transition distances (max node displacement), then assign frames per move
           // so that speed (px/frame) is roughly constant across the whole timeline.
           const disp = new Array(Math.max(0, hlen - 1)).fill(0);
@@ -1674,7 +1711,7 @@
 
           // Choose a global px/frame speed to match the transition frame budget.
           let pxPerFrame = sumDisp > 0 ? (sumDisp / Math.max(1, transitionBudget)) : 1;
-          const MIN_FRAMES_PER_MOVE = 8;
+          const MIN_FRAMES_PER_MOVE = 10;
           const MAX_FRAMES_PER_MOVE = 90;
 
           let framesPerMove = disp.map(d => (d <= 0.01) ? 1 : clamp(Math.ceil(d / Math.max(0.001, pxPerFrame)), MIN_FRAMES_PER_MOVE, MAX_FRAMES_PER_MOVE));
@@ -1686,6 +1723,16 @@
             const scale = sumFrames / Math.max(1, transitionBudget);
             pxPerFrame *= scale;
             framesPerMove = disp.map(d => (d <= 0.01) ? 1 : clamp(Math.ceil(d / Math.max(0.001, pxPerFrame)), MIN_FRAMES_PER_MOVE, MAX_FRAMES_PER_MOVE));
+          }
+
+          // Post-adjust per-move timing for recognizability.
+          for (let i = 0; i < framesPerMove.length; i++) {
+            if (addedBlueCount[i] > 0) {
+              framesPerMove[i] = Math.max(framesPerMove[i], COP_BLOCK_MIN_TRANS_FRAMES);
+            }
+            if (isMerge[i]) {
+              framesPerMove[i] = clamp(framesPerMove[i], MERGE_TRANS_FRAMES_MIN, MERGE_TRANS_FRAMES_MAX);
+            }
           }
 
           const totalTransitionFrames = framesPerMove.reduce((a, b) => a + b, 0);
@@ -1709,7 +1756,7 @@
           gotoHistory(state, 0);
           layout = { k, mode: 'force', nodes: pos[0].map(p => ({ x: p.x, y: p.y })), edges, transition: null };
 
-          for (let h = 0; h < holdFrames; h++) {
+          for (let h = 0; h < holdAtStep[0]; h++) {
             showExportOverlay('Capturing frames…', `Step 1/${hlen}`, (frameIdx / totalFrames) * 0.55);
             await writeFrame();
           }
@@ -1770,7 +1817,7 @@
             }
 
             layout = { k, mode: 'force', nodes: to.map(p => ({ x: p.x, y: p.y })), edges, transition: null };
-            for (let h = 0; h < holdFrames; h++) {
+            for (let h = 0; h < holdAtStep[i + 1]; h++) {
               showExportOverlay('Capturing frames…', `Step ${i + 2}/${hlen}`, (frameIdx / totalFrames) * 0.55);
               await writeFrame();
               if (h === 0) await sleep(0);
@@ -2683,6 +2730,23 @@
       return 18 + 10 * Math.sqrt(Math.max(1, sz));
     }
 
+    function contractLabelFontPx(label) {
+      const L = String(label).length;
+      return (L > 18) ? 11 : (L > 14) ? 12 : (L > 10) ? 13 : 15;
+    }
+
+    function contractMinRadiusForLabel(label, fontPx, pad = 12) {
+      // Ensure the node circle can fully contain the label (single-line).
+      // Uses a simple bounding-circle approximation for a (textWidth x textHeight) box.
+      const fs = Math.max(8, fontPx | 0);
+      ctx.save();
+      ctx.font = `900 ${fs}px ui-sans-serif, system-ui`;
+      const tw = ctx.measureText(String(label)).width;
+      ctx.restore();
+      const th = fs * 1.05;
+      return Math.hypot(tw * 0.5, th * 0.5) + pad;
+    }
+
     function buildContractViewDataFromPartition(nodes, comps, compOf) {
       // nodes: per-vertex positions (k entries).
       // comps/compOf: a partition of vertices into contracted nodes.
@@ -2800,7 +2864,13 @@
 
       const curves = new Array(cv.edges.length);
       const rad = new Array(m);
-      for (let i = 0; i < m; i++) rad[i] = contractNodeRadius(cv.sizes[i] || 1);
+      for (let i = 0; i < m; i++) {
+        const sz = cv.sizes[i] || 1;
+        const label = cv.labels[i] || '';
+        const fs = contractLabelFontPx(label);
+        const rLabel = contractMinRadiusForLabel(label, fs, 12);
+        rad[i] = Math.max(contractNodeRadius(sz), rLabel);
+      }
 
       function obstaclePenalty(A, C, B, a, b) {
         if (m <= 2) return 0;
@@ -3274,7 +3344,12 @@
             for (let ci = 0; ci < cv.comps.length; ci++) {
               const p = cv.centers[ci];
               const sz = cv.sizes[ci];
-              const r = contractNodeRadius(sz) * nodeScale;
+              const label = cv.labels[ci];
+              const fs0 = contractLabelFontPx(label);
+              const fs = Math.max(8, Math.round(fs0 * labelScale));
+              const rBase = contractNodeRadius(sz) * nodeScale;
+              const rLabel = contractMinRadiusForLabel(label, fs, 12);
+              const r = Math.max(rBase, rLabel);
               const is01 = highlight01 && (cv.has0[ci] || cv.has1[ci]);
 
               ctx.save();
@@ -3309,9 +3384,6 @@
               if (labelScale > 0.35) {
                 ctx.save();
                 ctx.globalAlpha = alpha;
-                const label = cv.labels[ci];
-                const fs0 = (label.length > 18) ? 11 : (label.length > 14) ? 12 : (label.length > 10) ? 13 : 15;
-                const fs = Math.max(8, Math.round(fs0 * labelScale));
                 ctx.font = `900 ${fs}px ui-sans-serif, system-ui`;
                 ctx.fillStyle = 'rgba(0,0,0,0.78)';
                 ctx.textAlign = 'center';
@@ -5355,7 +5427,11 @@
       let bestD = Infinity;
       for (let ci = 0; ci < cv.comps.length; ci++) {
         const p = cv.centers[ci];
-        const r = contractNodeRadius(cv.sizes[ci]);
+        const label = cv.labels[ci] || '';
+        const fs = contractLabelFontPx(label);
+        const rBase = contractNodeRadius(cv.sizes[ci]);
+        const rLabel = contractMinRadiusForLabel(label, fs, 12);
+        const r = Math.max(rBase, rLabel);
         const dx = x - p.x;
         const dy = y - p.y;
         const d = Math.hypot(dx, dy);
