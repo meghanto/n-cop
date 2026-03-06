@@ -3801,9 +3801,12 @@
             }
           }
 
-          // Post-merge node grows in (edges/pills appear only at the very end to avoid confusing topology mid-merge).
+          // Post-merge node: delay its appearance to avoid a confusing "third/ghost" node sitting between
+          // the two pre-merge nodes while they are still far apart.
+          // (Edges/pills also appear only at the very end to avoid confusing topology mid-merge.)
+          const sToVis = smoothstep(clamp((mergeT - 0.80) / 0.20, 0, 1));
           // Suppress hover during the merge to avoid stale hover state drawing a blue "ghost" edge.
-          renderContract(cvMain, 1, false, { nodeScale: sTo, labelScale: sTo, drawEdges: (mergeT > 0.92), drawPills: (mergeT > 0.92), drawNodes: true });
+          renderContract(cvMain, 1, false, { nodeScale: sToVis, labelScale: sToVis, drawEdges: (sToVis > 0.92), drawPills: (sToVis > 0.92), drawNodes: true });
         } else {
           renderContract(cvMain, 1, true);
         }
