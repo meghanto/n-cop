@@ -10,13 +10,18 @@ Solver for the **n-cop Shannon Switching game** on complete graphs. Cop and robb
 
 ## Known Results
 
-| Cops (n) | Cop wins on… | Robber wins on… | How we know |
-|----------|-------------|-----------------|-------------|
-| 2 | K1–K6 | **K7** | C++ prototype, fast |
-| 3 | K1–K8 | **K9** | ncop2-rs, 72 seconds |
-| 4 | K1–K10 (likely) | **K11?** | ncop2-rs run killed before finishing (~8 min in, 1.39B nodes) |
+| Cops (n) | Cop wins on… | Robber wins on… | Time | How we know |
+|-----------|-------------|-----------------|------|-------------|
+| 2 | K1–K6 | **K7** | fast | C++ prototype |
+| 3 | K1–K8 | **K9** | 4.9s | ncop2-rs (single-edge cop sub-steps) |
+| 4 | K1–**K11** | ? (K12 untested) | ~615s | ncop2-rs, 128M TT, 621M nodes |
 
-**The key open question: What is the smallest K where 4 cops lose?** K11 4-cop was running on a 32-core remote machine with dedup (341,055 raw root moves → 708 unique), processing ~2.8M nodes/sec. It was killed before completing.
+**Key findings:**
+- Single-edge cop sub-steps: 15x speedup (K9 3-cop: 72s → 4.9s)
+- Parallel cop sub-steps *hurt* performance — cop is an OR node, sequential-first is optimal
+- K11 4-cop: Cop wins in ~10 min with 128M TT (local Apple Silicon faster than 32-core remote Haswell)
+- TT sizing matters: 16M→128M gave 4.8x fewer nodes on K11; 128M→1G gave negligible improvement
+- Local machine (Apple Silicon) beats remote (32-core Haswell) because cop sub-steps are sequential — extra cores mostly idle
 
 ## Build & Run
 
@@ -31,12 +36,20 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 ./target/release/ncop2-rs
 ```
 
-Configure by editing `src/main.rs`:
+CLI: `ncop2-rs SIZE COPS [PAR_DEPTH]` (dispatches to monomorphized versions for sizes 3–16, cops 1–6). Falls back to compile-time defaults if no args.
+
+Configure defaults by editing `src/main.rs`:
 ```rust
-type Game = GameState<Size11, 4>;       // K_11 with 4 cops
-const TT_SIZE_LOG2: usize = 24;        // 16M TT entries
+const SIZE: u8 = 9;        // K_9
+const NCOP: usize = 4;     // 4 cops
+const TT_SIZE_LOG2: usize = 27; // 128M entries (16 bytes each → 2GB cop + 512MB robber)
 ```
 `PAR_MAX_DEPTH` is auto-set by `build.rs` based on available CPUs.
+
+Run tests:
+```bash
+cd ncop2-rs && RUSTFLAGS="-C target-cpu=native" cargo +nightly test --release
+```
 
 ### ncop-rs (Rust — original port)
 
@@ -84,28 +97,18 @@ Features: AI cop/robber, move browser, force-directed layouts, GIF/video export.
 
 ## Architecture
 
-### ncop2-rs/src/main.rs (fastest — 1443 lines)
+### ncop2-rs/src/main.rs (fastest — ~1470 lines)
 
-**Graph representation**: `BitGraph<Size>` using the `bitvec` crate — no AVX2 dependency, trusts compiler auto-vectorization. Size is encoded as a type-level natural (`Size11 = ((), Size10)` etc.) with const generic expressions.
-
-**Key optimizations** (achieved 160x speedup over ncop-rs on K8 3-cop):
-1. **Connected component contraction**: Before caching, robber's connected components are compressed into single nodes. The cache key is the adjacency matrix of unclaimed edges between/within contracted components. This collapses huge numbers of strategically equivalent positions.
-2. **Lockless transposition table**: Fixed-size array with splitmix64 hashing — no locks, no allocation overhead. Collisions cause re-evaluation (safe, just slower).
-3. **Rayon parallelism**: `par_bridge()` at depths < `PAR_MAX_DEPTH` (auto-tuned by `build.rs`).
-4. **Dedup pre-filter**: At the root level, canonically equivalent cop moves are deduplicated before evaluation (e.g., 341K → 708 for K11 4-cop).
-
-**Search**: Same minimax structure as ncop-rs (`cops_evaluate` / `robbers_evaluate`), but with component contraction making the TT dramatically more effective.
+**Graph representation**: AVX2 `__m256i` (256-bit), a 16×16 adjacency matrix as sixteen `u16` rows packed into one SIMD register. Same as ncop-rs but with additional optimizations:
+- **Connected component contraction**: Before caching, robber's connected components are compressed into single nodes. The cache key is the adjacency matrix of unclaimed edges between/within contracted components (`contract_and_hash`).
+- **Lockless transposition table**: Fixed-size array with splitmix64 hashing, 128-bit XOR trick for torn-read detection. Separate cop TT (full size) and robber TT (1/4 size).
+- **Single-edge cop sub-steps**: `cop_step(picks_left)` makes sequential single-edge moves instead of picking N edges at once. TT caches intermediate states via `hash_with_picks(hash, picks_left)`. This dramatically improves TT hit rates — different N-edge combinations share intermediate states.
+- **Component-pair dedup**: For single edges, two edges connecting the same component pair produce identical contracted states. `[[bool; MAX_COMP]; MAX_COMP]` stack array provides O(1) zero-allocation dedup.
+- **Rayon parallelism**: At depths < `PAR_MAX_DEPTH`, robber nodes use sequential-first + `par_iter().find_map_any()` verification. Cop nodes stay sequential (OR node — parallel speculation wastes work).
 
 ### ncop-rs/src/main.rs (original — 601 lines)
 
-**Graph representation**: `AdjMatrix = __m256i` (256-bit AVX2), a 16×16 adjacency matrix as sixteen `u16` rows. Pre-computed `STAR_GRAPHS[16]` (one per vertex) make add/remove/has_edge a few SIMD ops. `is_0_1_connected()` does BFS entirely in SIMD via horizontal-OR propagation.
-
-**GameState**: `GameState<const K: u8, const COPS: usize>` — graph size and cop count are compile-time constants. Holds `cop` and `robber` adjacency matrices.
-
-**Search** (`SearchForWinner` trait):
-- Cop enumerates all `C(remaining_edges, COPS)` combinations using `itertools::array_combinations::<COPS>()`
-- Transposition table: `RwLock<HashMap<[u64;8], Victor>>`, consulted at depths < `CACHE_DEPTH`
-- `NextFewerK` trait + macro: when fewer than COPS edges remain, falls back to `GameState<K, COPS-1>`
+Uses AVX2 `__m256i` for adjacency matrices, pre-computed `STAR_GRAPHS[16]` for fast edge operations, and SIMD BFS for connectivity checking.
 
 ### ncop3-rs/src/main.rs (canonical DAG — 486 lines)
 
@@ -127,19 +130,24 @@ Starting from the original `ncop2-rs` (single-threaded, no contraction, basic TT
 | Baseline (ncop-rs) | 82s | — |
 | + Component contraction + lockless TT + Rayon | 0.5s | **160x** |
 | K9 3-cop (previously intractable) | 72s | ∞ |
+| Single-edge cop sub-steps | 4.9s | **15x** vs 72s |
 
 Work-stealing (parallelism at multiple depths) was tried but regressed performance due to `par_bridge()` overhead. Root-only parallelism remains the default.
 
+Parallel cop sub-steps were tested (both all-at-once and batched `nproc/COPS`): they generated ~60% more nodes (OR node wastes parallel work on speculative branches). Sequential cop remains optimal.
+
+TT sizing: 128M entries (TT_SIZE_LOG2=27) is the sweet spot for K11. Going to 1G (LOG2=30, 20GB RAM) gave negligible improvement. Going below 128M causes severe eviction (16M→128M = 4.8x fewer nodes).
+
 ## Key Constraints
 
-- `ncop-rs` requires AVX2 (`target-cpu=native`)
-- `ncop2-rs` requires Rust nightly (`generic_const_exprs`)
-- Graph sizes capped at 16 in ncop-rs (256-bit bitboard = 16 × u16); ncop2-rs uses `bitvec` so the limit is higher but runtime is the bottleneck
+- All solvers require Rust nightly (edition 2024)
+- `ncop-rs` and `ncop2-rs` require AVX2 (`target-cpu=native`)
+- Graph sizes capped at 16 (256-bit bitboard = 16 × u16)
 - Search is exhaustive minimax — runtime grows exponentially
-- The three Rust crates (`ncop-rs/`, `ncop2-rs/`, `ncop3-rs/`) are separate git repos, not yet integrated as submodules into the main repo
 
 ### Running on Remote Server
-We have access to a 32-core Windows remote machine specifically for running large jobs like K=11 4-cop.
+We have access to a 32-core Windows remote machine (Haswell), but **local Apple Silicon is faster** for this workload because cop sub-steps are sequential — the extra cores mostly sit idle. Remote is only useful if effective parallelism is added to the cop search.
 - **SSH Target**: `meghanto@172.23.44.77`
-- **Copying over code**: Use `scp` or `rsync` from the local machine.
-- **Running**: The remote has Rust installed. You can compile and run directly on it via SSH commands (e.g. `ssh meghanto@172.23.44.77 'cd C:\Users\meghanto\ncop2-rs && cargo run --release'`).
+- **Copying over code**: `scp ncop2-rs/src/main.rs meghanto@172.23.44.77:'C:\Users\meghanto\ncop2-rs\src\main.rs'`
+- **Building**: `ssh meghanto@172.23.44.77 'cd C:\Users\meghanto\ncop2-rs && set RUSTFLAGS=-C target-cpu=native && cargo +nightly build --release'`
+- **Running**: `ssh meghanto@172.23.44.77 'cd C:\Users\meghanto\ncop2-rs && target\release\ncop2-rs.exe 11 4'`

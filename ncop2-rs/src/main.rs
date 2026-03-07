@@ -41,7 +41,7 @@ macro_rules! env_usize {
 
 const SIZE: u8 = 9;
 const NCOP: usize = 4;
-const TT_SIZE_LOG2: usize = 24; // 16M entries
+const TT_SIZE_LOG2: usize = 27; // 128M entries
 
 /// Default from build.rs based on available CPUs: floor(log2(cpus)).
 /// Overridable at runtime via 4th command-line arg.
@@ -278,6 +278,28 @@ fn splitmix64(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
+struct Prng {
+    state: u64,
+}
+
+impl Prng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+    fn next_usize(&mut self, bound: usize) -> usize {
+        self.state = splitmix64(self.state);
+        (self.state % bound as u64) as usize
+    }
+}
+
+fn shuffle<T>(slice: &mut [T], rng: &mut Prng) {
+    if slice.is_empty() { return; }
+    for i in (1..slice.len()).rev() {
+        let j = rng.next_usize(i + 1);
+        slice.swap(i, j);
+    }
+}
+
 struct ContractedInfo {
     comp: [u8; MAX_COMP],
     n_comps: u8,
@@ -448,6 +470,15 @@ fn contract_and_hash(info: &ContractedInfo) -> [u64; 2] {
     [h0, h1]
 }
 
+/// Mix picks_left into a base hash to differentiate TT entries for
+/// the same contracted state at different cop sub-step counts.
+fn hash_with_picks(hash: [u64; 2], picks_left: usize) -> [u64; 2] {
+    [
+        splitmix64(hash[0] ^ (picks_left as u64)),
+        splitmix64(hash[1] ^ (picks_left as u64).wrapping_mul(0x517cc1b727220a95)),
+    ]
+}
+
 // ============================================================
 // Lockless transposition table (128-bit hash, XOR trick)
 // ============================================================
@@ -518,132 +549,87 @@ impl TranspositionTable {
 // ============================================================
 
 trait SearchForWinner: Sized + Copy + Send + Sync {
-    fn cops_evaluate(&self, depth: usize, tt: &TranspositionTable, rtt: &TranspositionTable) -> Victor;
-    fn robbers_evaluate(&self, depth: usize, tt: &TranspositionTable, rtt: &TranspositionTable) -> Victor;
+    fn cop_step(&self, picks_left: usize, depth: usize, tt: &TranspositionTable, rtt: &TranspositionTable, rng: &mut Prng) -> Victor;
+    fn cops_evaluate(&self, depth: usize, tt: &TranspositionTable, rtt: &TranspositionTable, rng: &mut Prng) -> Victor;
+    fn robbers_evaluate(&self, depth: usize, tt: &TranspositionTable, rtt: &TranspositionTable, rng: &mut Prng) -> Victor;
 }
 
 impl<const K: u8, const COPS: usize> SearchForWinner for GameState<K, COPS> {
-    fn cops_evaluate(&self, depth: usize, tt: &TranspositionTable, rtt: &TranspositionTable) -> Victor {
+    fn cop_step(&self, picks_left: usize, depth: usize, tt: &TranspositionTable, rtt: &TranspositionTable, rng: &mut Prng) -> Victor {
+        // No more picks → check win, then hand to robber
+        if picks_left == 0 {
+            if self.did_cop_win() {
+                return Victor::Cop;
+            }
+            return self.robbers_evaluate(depth, tt, rtt, rng);
+        }
+
         NODES_EVALUATED.fetch_add(1, Ordering::Relaxed);
 
-        let mut info = compute_components(self);
-        if info.is_none() {
-            // comp[0] == comp[1] → robber already connected 0-1
-            return Victor::Robber;
-        }
-        if let Some(ref ci) = info {
-            let h = contract_and_hash(ci);
-            if let Some(v) = tt.probe(h) {
-                TT_HITS.fetch_add(1, Ordering::Relaxed);
-                return v;
-            }
+        // Early cutoff: cop already won, remaining picks don't matter
+        if self.did_cop_win() {
+            return Victor::Cop;
         }
 
-        // Collect cross-component edges only (within-component edges are wasted cop moves)
+        let info = compute_components(self);
+        if info.is_none() {
+            return Victor::Robber;
+        }
+        let info = info.unwrap();
+
+        let threats = info.adj[info.comp[0] as usize][info.comp[1] as usize] as usize;
+        if threats > picks_left {
+            return Victor::Robber;
+        }
+
+        // TT probe with picks_left mixed in
+        let base_hash = contract_and_hash(&info);
+        let h = hash_with_picks(base_hash, picks_left);
+        if let Some(v) = tt.probe(h) {
+            TT_HITS.fetch_add(1, Ordering::Relaxed);
+            return v;
+        }
+
+        // Collect cross-component edges only
         let mut raw_edges = [(0usize, 0usize); MAX_EDGES];
         let mut n_edges = 0;
         for (u, v) in self.remaining_edges() {
-            if let Some(ref ci) = info {
-                if ci.comp[u] == ci.comp[v] {
-                    continue; // skip within-component edges
-                }
+            if info.comp[u] == info.comp[v] {
+                continue;
             }
             raw_edges[n_edges] = (u, v);
             n_edges += 1;
         }
-        // Sort edges by static score at all depths — prioritize terminal edges and bottlenecks.
-        // Blocking the robber's best moves first leads to earlier cutoffs.
+
+        // Shuffle before stable sort to randomize equal-score edges
+        shuffle(&mut raw_edges[..n_edges], rng);
+        
+        // Sort edges by score for better cutoffs
         let mut edges = [(0usize, 0usize); MAX_EDGES];
-        if let Some(ref ci) = info {
-            sort_edges_by_score(&raw_edges, n_edges, ci, &mut edges);
-        } else {
-            edges[..n_edges].copy_from_slice(&raw_edges[..n_edges]);
-        }
+        sort_edges_by_score(&raw_edges, n_edges, &info, &mut edges);
 
-        let mut cop_choices = edges[..n_edges]
-            .iter()
-            .copied()
-            .array_combinations::<COPS>()
-            .peekable();
+        // Component-pair dedup: edges connecting the same component pair
+        // produce identical contracted states, so only try one per pair.
+        let mut seen_pair = [[false; MAX_COMP]; MAX_COMP];
 
-        // Local dedup via mutate-and-undo on parent's adj matrix.
-        // Cop moves don't change robber components, only edge counts between them.
-        // Skip combinations that produce duplicate contracted states.
-        let dedup_filter = |choices: &[(usize, usize); COPS],
-                            seen: &mut HashSet<[u64; 2]>,
-                            ci: &mut ContractedInfo|
-         -> bool {
-            // Decrement adj in-place
-            for (idx, &(u, v)) in choices.iter().enumerate() {
-                let cu = ci.comp[u] as usize;
-                let cv = ci.comp[v] as usize;
-                if cu == cv {
-                    // Undo decrements made so far
-                    for &(u2, v2) in &choices[..idx] {
-                        let cu2 = ci.comp[u2] as usize;
-                        let cv2 = ci.comp[v2] as usize;
-                        ci.adj[cu2][cv2] += 1;
-                        ci.adj[cv2][cu2] += 1;
-                    }
-                    return false;
-                }
-                ci.adj[cu][cv] -= 1;
-                ci.adj[cv][cu] -= 1;
-            }
-            let hash = contract_and_hash(ci);
-            // Undo all decrements
-            for &(u, v) in choices.iter() {
-                let cu = ci.comp[u] as usize;
-                let cv = ci.comp[v] as usize;
-                ci.adj[cu][cv] += 1;
-                ci.adj[cv][cu] += 1;
-            }
-            seen.insert(hash)
-        };
-
-        // Thread-local reusable HashSets indexed by depth — zero allocation after warmup.
-        // Box gives each HashSet a stable heap address; Vec growth only moves Box pointers.
-        // Safety: thread-local ⇒ single-thread; depth-indexed ⇒ no aliasing across recursive calls.
-        thread_local! {
-            static DEDUP_SETS: std::cell::UnsafeCell<Vec<Box<HashSet<[u64; 2]>>>> =
-                std::cell::UnsafeCell::new(Vec::new());
-        }
-        let seen: &mut HashSet<[u64; 2]> = unsafe {
-            let sets = &mut *DEDUP_SETS.with(|c| c.get());
-            while sets.len() <= depth {
-                sets.push(Box::new(HashSet::with_capacity(128)));
-            }
-            sets[depth].clear();
-            &mut **sets.get_unchecked_mut(depth)
-        };
-
-        let victor = if cop_choices.peek().is_none() {
+        let victor = if n_edges == 0 {
+            // No cross-component remaining edges → robber can never connect 0-1
             Victor::Cop
         } else {
-            // Fully sequential cop search — ordering finds winning move fast.
-            // Parallelism moved to robber level (verification step).
             let mut victor = Victor::Robber;
-            let mut first = true;
-            for choices in cop_choices {
-                if let Some(ref mut ci) = info {
-                    if !dedup_filter(&choices, seen, ci) {
-                        continue;
-                    }
+            for i in 0..n_edges {
+                let (u, v) = edges[i];
+                let cu = info.comp[u] as usize;
+                let cv = info.comp[v] as usize;
+                let (lo, hi) = if cu <= cv { (cu, cv) } else { (cv, cu) };
+                if seen_pair[lo][hi] {
+                    continue;
                 }
-                if first && depth == 0 {
-                    // Count unique moves for logging (only first time)
-                    // Note: counting is deferred since we lazily iterate
-                }
-                first = false;
+                seen_pair[lo][hi] = true;
+
                 let mut state = *self;
-                for (u, v) in choices {
-                    state.cop.add_edge(u, v);
-                }
-                if state.did_cop_win() {
-                    victor = Victor::Cop;
-                    break;
-                }
-                if state.robbers_evaluate(depth, tt, rtt) == Victor::Cop {
+                state.cop.add_edge(u, v);
+                if state.cop_step(picks_left - 1, depth, tt, rtt, rng) == Victor::Cop {
                     victor = Victor::Cop;
                     break;
                 }
@@ -651,19 +637,27 @@ impl<const K: u8, const COPS: usize> SearchForWinner for GameState<K, COPS> {
             victor
         };
 
-        if let Some(ref ci) = info {
-            tt.store(contract_and_hash(ci), victor);
-            TT_STORES.fetch_add(1, Ordering::Relaxed);
-        }
+        tt.store(h, victor);
+        TT_STORES.fetch_add(1, Ordering::Relaxed);
 
         victor
     }
 
-    fn robbers_evaluate(&self, depth: usize, tt: &TranspositionTable, rtt: &TranspositionTable) -> Victor {
+    fn cops_evaluate(&self, depth: usize, tt: &TranspositionTable, rtt: &TranspositionTable, rng: &mut Prng) -> Victor {
+        self.cop_step(COPS, depth, tt, rtt, rng)
+    }
+
+    fn robbers_evaluate(&self, depth: usize, tt: &TranspositionTable, rtt: &TranspositionTable, rng: &mut Prng) -> Victor {
         // compute_components returns None when comp[0]==comp[1] → robber has won
         let info = compute_components(self);
         if info.is_none() {
             return Victor::Robber;
+        }
+
+        if let Some(ref ci) = info {
+            if ci.adj[ci.comp[0] as usize][ci.comp[1] as usize] > 0 {
+                return Victor::Robber;
+            }
         }
 
         // Robber TT probe
@@ -686,67 +680,23 @@ impl<const K: u8, const COPS: usize> SearchForWinner for GameState<K, COPS> {
             raw_edges[n_edges] = (u, v);
             n_edges += 1;
         }
-        let edges = raw_edges;
+        let mut edges = raw_edges;
 
-        // Parallel robber verification with NO depth limit.
-        // Sequential-first: try best response (usually a refutation). If it fails,
-        // parallelize remaining responses — this is the cop-winning verification step.
-        //
-        // Rayon's work-stealing with LIFO deques naturally prioritizes deeper tasks:
-        // each thread works depth-first on its own deque, and steals breadth-first
-        // from others. This approximates a "deeper = higher priority" queue.
-        //
-        // Minimum fan-out threshold avoids overhead at leaf-level nodes.
-        const MIN_PARALLEL_EDGES: usize = 4;
-
-        let victor = if n_edges == 0 {
-            Victor::Cop
-        } else {
-            // Try first response sequentially
-            let (u0, v0) = edges[0];
-            let mut state0 = *self;
-            state0.robber.add_edge(u0, v0);
-            if state0.did_robber_win() || state0.cops_evaluate(depth + 1, tt, rtt) == Victor::Robber {
-                if depth == 0 {
-                    println!(", but Robber can win by adding edge ({u0}, {v0})");
-                }
-                Victor::Robber
-            } else if n_edges >= MIN_PARALLEL_EDGES {
-                // First response failed → likely cop-winning → parallelize verification
-                let robber_wins = edges[1..n_edges]
-                    .par_iter()
-                    .find_map_any(|&(u, v)| {
-                        let mut state = *self;
-                        state.robber.add_edge(u, v);
-                        if state.did_robber_win() || state.cops_evaluate(depth + 1, tt, rtt) == Victor::Robber {
-                            Some((u, v))
-                        } else {
-                            None
-                        }
-                    });
-                if let Some((u, v)) = robber_wins {
+        let mut victor = Victor::Cop;
+        if n_edges > 0 {
+            let edges_slice = &mut edges[..n_edges];
+            shuffle(edges_slice, rng);
+            
+            for &(u, v) in edges_slice.iter() {
+                let mut state = *self;
+                state.robber.add_edge(u, v);
+                if state.did_robber_win() || state.cops_evaluate(depth + 1, tt, rtt, rng) == Victor::Robber {
                     if depth == 0 {
                         println!(", but Robber can win by adding edge ({u}, {v})");
                     }
-                    Victor::Robber
-                } else {
-                    Victor::Cop
+                    victor = Victor::Robber;
+                    break;
                 }
-            } else {
-                // Small fan-out: sequential to avoid rayon overhead
-                let mut victor = Victor::Cop;
-                for &(u, v) in &edges[1..n_edges] {
-                    let mut state = *self;
-                    state.robber.add_edge(u, v);
-                    if state.did_robber_win() || state.cops_evaluate(depth + 1, tt, rtt) == Victor::Robber {
-                        if depth == 0 {
-                            println!(", but Robber can win by adding edge ({u}, {v})");
-                        }
-                        victor = Victor::Robber;
-                        break;
-                    }
-                }
-                victor
             }
         };
 
@@ -819,17 +769,17 @@ mod test {
         state.cop.add_edge(1, 5);
         state.robber.add_edge(1, 2);
 
-        assert_eq!(state.cops_evaluate(0, &tt(), &rtt()), Victor::Cop);
+        assert_eq!(state.cops_evaluate(0, &tt(), &rtt(), &mut crate::Prng::new(12345)), Victor::Cop);
     }
 
     #[test]
     fn cop_1_wins_4_clique() {
         let mut state = GameState::<4, 1>::new();
-        assert_eq!(state.cops_evaluate(0, &tt(), &rtt()), Victor::Robber);
+        assert_eq!(state.cops_evaluate(0, &tt(), &rtt(), &mut crate::Prng::new(12345)), Victor::Robber);
 
         state.cop.add_edge(0, 1);
         state.robber.add_edge(0, 2);
-        assert_eq!(state.cops_evaluate(0, &tt(), &rtt()), Victor::Robber);
+        assert_eq!(state.cops_evaluate(0, &tt(), &rtt(), &mut crate::Prng::new(12345)), Victor::Robber);
     }
 
     #[test]
@@ -924,7 +874,7 @@ mod test {
     #[test]
     fn bfs_vs_dfs_k4_1cop() {
         let state = GameState::<4, 1>::new();
-        let dfs_result = state.cops_evaluate(0, &tt(), &rtt());
+        let dfs_result = state.cops_evaluate(0, &tt(), &rtt(), &mut crate::Prng::new(12345));
         let bfs_result = solve_bfs(state);
         assert_eq!(dfs_result, bfs_result);
     }
@@ -932,7 +882,7 @@ mod test {
     #[test]
     fn bfs_vs_dfs_k6_2cop() {
         let state = GameState::<6, 2>::new();
-        let dfs_result = state.cops_evaluate(0, &tt(), &rtt());
+        let dfs_result = state.cops_evaluate(0, &tt(), &rtt(), &mut crate::Prng::new(12345));
         let bfs_result = solve_bfs(state);
         assert_eq!(dfs_result, bfs_result);
     }
@@ -940,7 +890,7 @@ mod test {
     #[test]
     fn bfs_vs_dfs_k7_2cop() {
         let state = GameState::<7, 2>::new();
-        let dfs_result = state.cops_evaluate(0, &tt(), &rtt());
+        let dfs_result = state.cops_evaluate(0, &tt(), &rtt(), &mut crate::Prng::new(12345));
         let bfs_result = solve_bfs(state);
         assert_eq!(dfs_result, bfs_result);
     }
@@ -1443,7 +1393,23 @@ fn run<const K: u8, const COPS: usize>() {
         }
     });
 
-    let victor = state.cops_evaluate(0, &tt, &rtt);
+    let num_threads = PAR_DEPTH.load(Ordering::Relaxed);
+    let num_threads = if num_threads == 0 { 1 } else { std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    rayon::scope(|s| {
+        for i in 0..num_threads {
+            let tx = tx.clone();
+            let tt = &tt;
+            let rtt = &rtt;
+            s.spawn(move |_| {
+                let mut rng = Prng::new(1337 + i as u64 * 0x9e3779b97f4a7c15);
+                let victor = state.cops_evaluate(0, tt, rtt, &mut rng);
+                let _ = tx.send(victor);
+            });
+        }
+    });    
+    let victor = rx.recv().unwrap();
     DONE.store(true, Ordering::Relaxed);
 
     let elapsed = start.elapsed().as_secs_f64();
