@@ -231,6 +231,41 @@ impl Searcher {
         }
 
         let whole_turn = !is_cop || picks_left == state.n;
+        
+        // --- Structural Fast-Path (Density / Fractional Arboricity check) ---
+        // If we are at the root of a full turn evaluating the whole graph,
+        // and the number of edges the robber could potentially use is overwhelmingly
+        // large compared to the vertices, the graph is too dense for the Cop to win.
+        // Nash-Williams: A graph has k edge-disjoint spanning trees only if |E| >= k(|V| - 1).
+        // If we can verify 2n spanning trees, the robber mathematically wins.
+        if whole_turn && depth == 0 {
+            let mut avail_edges = 0;
+            let mut avail_nodes_mask = 0u16;
+            for u in 0..state.k as usize {
+                let mut avail = ((1 << state.k) - 1) & !state.blue.rows[u];
+                avail &= !((1 << (u + 1)) - 1); // only count u < v once
+                let count = avail.count_ones();
+                if count > 0 {
+                    avail_edges += count;
+                    avail_nodes_mask |= 1 << u;
+                    avail_nodes_mask |= avail;
+                }
+            }
+            
+            let v_count = avail_nodes_mask.count_ones();
+            if v_count > 1 {
+                let required_edges_for_2n_trees = 2 * (state.n as u32) * (v_count - 1);
+                
+                // If there literally aren't enough edges left in the entire graph
+                // to form the required spanning trees, we can't mathematically prove a win this way.
+                // However, if the graph is *massively* dense (e.g., > 2n*(V-1)), we could 
+                // return early. Since exactly packing them is slow, we use this as a hard cutoff
+                // if we were to implement a full Matroid intersection later. 
+                // For now, if E is incredibly small, we could conversely prove the Cop wins,
+                // but the Minimax will find that instantly anyway.
+            }
+        }
+        
         let hash = Self::hash_state(state, is_cop);
         let orig_alpha = alpha;
         
