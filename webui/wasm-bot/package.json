@@ -1,0 +1,15 @@
+{
+  "name": "wasm-bot",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "wasm_bot_bg.wasm",
+    "wasm_bot.js",
+    "wasm_bot.d.ts"
+  ],
+  "main": "wasm_bot.js",
+  "types": "wasm_bot.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
