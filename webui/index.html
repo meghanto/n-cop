@@ -495,7 +495,10 @@
     </div>
   </div>
 
-  <script>
+  <script type="module">
+    import initWasm, { cop_best_move_wasm } from './wasm-bot/wasm_bot.js';
+    await initWasm();
+
     // --- Model ----------------------------------------------------------------
     const COP = 'cop';
     const ROBBER = 'robber';
@@ -1575,8 +1578,10 @@
     async function canvasToPngU8Scaled(targetW) {
       const srcW = els.canvas.width;
       const srcH = els.canvas.height;
-      const w = Math.max(2, targetW | 0);
-      const h = Math.max(2, Math.round(srcH * (w / srcW)));
+      let w = Math.max(2, targetW | 0);
+      let h = Math.max(2, Math.round(srcH * (w / srcW)));
+      if (w % 2 !== 0) w++;
+      if (h % 2 !== 0) h++;
       const c = document.createElement('canvas');
       c.width = w;
       c.height = h;
@@ -5673,7 +5678,29 @@
             if (!els.autoCop.checked) return;
             if (state.gameOver || state.turn !== COP) return;
 
-            const set = copBestMoveSetDeep(state, currentAICfg());
+            let set = [];
+            const timeLimit = (els.thinkMode && els.thinkMode.value === 'light') ? 2000 : 5000;
+            const blueEdges = [];
+            for (const key of state.blue) {
+              const [u, v] = parseEdgeKey(key);
+              blueEdges.push(u, v);
+            }
+            const redEdges = [];
+            for (const key of state.red) {
+              const [u, v] = parseEdgeKey(key);
+              redEdges.push(u, v);
+            }
+            
+            const wasmRes = cop_best_move_wasm(
+              state.k,
+              state.copMovesLeft,
+              new Uint8Array(blueEdges),
+              new Uint8Array(redEdges),
+              timeLimit
+            );
+            for (let i = 0; i < wasmRes.length; i += 2) {
+              set.push({ u: wasmRes[i], v: wasmRes[i+1] });
+            }
 
             if (set.length === 0) {
               // Fallback to the simple greedy heuristic if the search couldn't find candidates.

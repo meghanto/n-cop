@@ -11,7 +11,7 @@ use std::arch::x86_64::_mm256_ternarylogic_epi64;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::io::{Write, stdout};
+use std::io::{self, Write};
 use std::iter;
 use std::mem::{transmute, transmute_copy};
 use std::num::NonZero;
@@ -401,6 +401,14 @@ fn sort_edges_by_score(
     n
 }
 
+fn reset_counters() {
+    NODES_EVALUATED.store(0, Ordering::Relaxed);
+    TT_HITS.store(0, Ordering::Relaxed);
+    TT_STORES.store(0, Ordering::Relaxed);
+    RTT_HITS.store(0, Ordering::Relaxed);
+    RTT_STORES.store(0, Ordering::Relaxed);
+}
+
 fn contract_and_hash(info: &ContractedInfo) -> [u64; 2] {
     let nc = info.n_comps as usize;
     let mut adj = info.adj;
@@ -491,12 +499,83 @@ fn hash_with_picks(hash: [u64; 2], picks_left: usize) -> [u64; 2] {
 // Collision requires BOTH 63-bit hash[0] AND 64-bit hash[1] to match: ~1/2^127.
 // Torn read requires the mismatched word to accidentally verify: ~1/2^64.
 
+#[cfg(target_os = "windows")]
+const TT_SEGMENT_LOG2: usize = 26; // 1 GiB segments at 16 bytes/entry
+#[cfg(target_os = "windows")]
+const TT_SEGMENT_ENTRIES: usize = 1usize << TT_SEGMENT_LOG2;
+#[cfg(target_os = "windows")]
+const TT_INITIAL_GIB: usize = 10;
+#[cfg(target_os = "windows")]
+const TT_MAX_GIB: usize = 40;
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct MemoryStatusEx {
+    dwLength: u32,
+    dwMemoryLoad: u32,
+    ullTotalPhys: u64,
+    ullAvailPhys: u64,
+    ullTotalPageFile: u64,
+    ullAvailPageFile: u64,
+    ullTotalVirtual: u64,
+    ullAvailVirtual: u64,
+    ullAvailExtendedVirtual: u64,
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" {
+    fn GlobalMemoryStatusEx(lpBuffer: *mut MemoryStatusEx) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+fn windows_available_physical_bytes() -> u64 {
+    let mut status = MemoryStatusEx {
+        dwLength: std::mem::size_of::<MemoryStatusEx>() as u32,
+        dwMemoryLoad: 0,
+        ullTotalPhys: 0,
+        ullAvailPhys: 0,
+        ullTotalPageFile: 0,
+        ullAvailPageFile: 0,
+        ullTotalVirtual: 0,
+        ullAvailVirtual: 0,
+        ullAvailExtendedVirtual: 0,
+    };
+    unsafe {
+        if GlobalMemoryStatusEx(&mut status) != 0 {
+            status.ullAvailPhys
+        } else {
+            0
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn allocate_tt_segment() -> Box<[[AtomicU64; 2]]> {
+    let mut entries = Vec::with_capacity(TT_SEGMENT_ENTRIES);
+    for _ in 0..TT_SEGMENT_ENTRIES {
+        entries.push([AtomicU64::new(0), AtomicU64::new(0)]);
+    }
+    entries.into_boxed_slice()
+}
+
 struct TranspositionTable {
+    #[cfg(not(target_os = "windows"))]
     entries: Box<[[AtomicU64; 2]]>,
+    #[cfg(not(target_os = "windows"))]
     mask: usize,
+
+    #[cfg(target_os = "windows")]
+    segments: Box<[std::sync::OnceLock<Box<[[AtomicU64; 2]]>>]>,
+    #[cfg(target_os = "windows")]
+    active_segments: AtomicUsize,
+    #[cfg(target_os = "windows")]
+    max_segments: usize,
+    #[cfg(target_os = "windows")]
+    stores_since_growth: AtomicU64,
 }
 
 impl TranspositionTable {
+    #[cfg(not(target_os = "windows"))]
     fn new(size_log2: usize) -> Self {
         let size = 1usize << size_log2;
         let mut entries = Vec::with_capacity(size);
@@ -509,6 +588,23 @@ impl TranspositionTable {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    fn new(_size_log2: usize) -> Self {
+        let segments: Box<[std::sync::OnceLock<Box<[[AtomicU64; 2]]>>]> =
+            (0..TT_MAX_GIB).map(|_| std::sync::OnceLock::new()).collect();
+        let table = TranspositionTable {
+            segments,
+            active_segments: AtomicUsize::new(TT_INITIAL_GIB),
+            max_segments: TT_MAX_GIB,
+            stores_since_growth: AtomicU64::new(0),
+        };
+        for i in 0..TT_INITIAL_GIB {
+            let _ = table.segments[i].set(allocate_tt_segment());
+        }
+        table
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn probe(&self, hash: [u64; 2]) -> Option<Victor> {
         let idx = (hash[0] as usize) & self.mask;
         let word0 = self.entries[idx][0].load(Ordering::Relaxed);
@@ -516,7 +612,6 @@ impl TranspositionTable {
             return None;
         }
         let word1 = self.entries[idx][1].load(Ordering::Relaxed);
-        // Verify both halves: hash[0] match (63 bits) + XOR trick (64 bits)
         if (word0 & !1) == (hash[0] & !1) && (word1 ^ word0) == hash[1] {
             Some(if word0 & 1 == 1 {
                 Victor::Cop
@@ -528,6 +623,65 @@ impl TranspositionTable {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    fn probe(&self, hash: [u64; 2]) -> Option<Victor> {
+        let total_entries = self.active_segments.load(Ordering::Relaxed) * TT_SEGMENT_ENTRIES;
+        let idx = (hash[0] as usize) % total_entries;
+        let segment = idx >> TT_SEGMENT_LOG2;
+        let offset = idx & (TT_SEGMENT_ENTRIES - 1);
+        let entries = self.segments[segment].get().unwrap();
+        let word0 = entries[offset][0].load(Ordering::Relaxed);
+        if word0 == 0 {
+            return None;
+        }
+        let word1 = entries[offset][1].load(Ordering::Relaxed);
+        if (word0 & !1) == (hash[0] & !1) && (word1 ^ word0) == hash[1] {
+            Some(if word0 & 1 == 1 {
+                Victor::Cop
+            } else {
+                Victor::Robber
+            })
+        } else {
+            None
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn maybe_grow(&self) {
+        let active = self.active_segments.load(Ordering::Relaxed);
+        if active >= self.max_segments {
+            return;
+        }
+        let stores = self.stores_since_growth.fetch_add(1, Ordering::Relaxed) + 1;
+        if stores < (TT_SEGMENT_ENTRIES / 4) as u64 {
+            return;
+        }
+        if self
+            .stores_since_growth
+            .compare_exchange(stores, 0, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        if windows_available_physical_bytes() < (2u64 << 30) {
+            return;
+        }
+        let next = self.active_segments.load(Ordering::Acquire);
+        if next >= self.max_segments {
+            return;
+        }
+        if self.segments[next].get().is_none() {
+            let _ = self.segments[next].set(allocate_tt_segment());
+        }
+        let _ = self.active_segments.compare_exchange(
+            next,
+            next + 1,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
     fn store(&self, hash: [u64; 2], result: Victor) {
         let idx = (hash[0] as usize) & self.mask;
         let word0 = (hash[0] & !1)
@@ -536,11 +690,32 @@ impl TranspositionTable {
                 Victor::Robber => 0,
             };
         if word0 == 0 {
-            return; // skip the ~1/2^63 edge case (sentinel collision)
+            return;
         }
         let word1 = hash[1] ^ word0;
         self.entries[idx][0].store(word0, Ordering::Relaxed);
         self.entries[idx][1].store(word1, Ordering::Relaxed);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn store(&self, hash: [u64; 2], result: Victor) {
+        self.maybe_grow();
+        let total_entries = self.active_segments.load(Ordering::Relaxed) * TT_SEGMENT_ENTRIES;
+        let idx = (hash[0] as usize) % total_entries;
+        let segment = idx >> TT_SEGMENT_LOG2;
+        let offset = idx & (TT_SEGMENT_ENTRIES - 1);
+        let entries = self.segments[segment].get().unwrap();
+        let word0 = (hash[0] & !1)
+            | match result {
+                Victor::Cop => 1,
+                Victor::Robber => 0,
+            };
+        if word0 == 0 {
+            return;
+        }
+        let word1 = hash[1] ^ word0;
+        entries[offset][0].store(word0, Ordering::Relaxed);
+        entries[offset][1].store(word1, Ordering::Relaxed);
     }
 }
 
@@ -708,6 +883,95 @@ impl<const K: u8, const COPS: usize> SearchForWinner for GameState<K, COPS> {
 
         victor
     }
+}
+
+fn legal_robber_move<const K: u8, const COPS: usize>(
+    state: &GameState<K, COPS>,
+    u: usize,
+    v: usize,
+) -> bool {
+    u < K as usize && v < K as usize && u != v && !state.cop.has_edge(u, v) && !state.robber.has_edge(u, v)
+}
+
+fn find_winning_cop_turn<const K: u8, const COPS: usize>(
+    state: &GameState<K, COPS>,
+    tt: &TranspositionTable,
+    rtt: &TranspositionTable,
+    rng: &mut Prng,
+) -> Option<Vec<(usize, usize)>> {
+    let mut line = Vec::with_capacity(COPS);
+    if extend_winning_cop_turn(state, COPS, 0, tt, rtt, rng, &mut line) {
+        Some(line)
+    } else {
+        None
+    }
+}
+
+fn extend_winning_cop_turn<const K: u8, const COPS: usize>(
+    state: &GameState<K, COPS>,
+    picks_left: usize,
+    depth: usize,
+    tt: &TranspositionTable,
+    rtt: &TranspositionTable,
+    rng: &mut Prng,
+    line: &mut Vec<(usize, usize)>,
+) -> bool {
+    if picks_left == 0 {
+        if state.did_cop_win() {
+            return true;
+        }
+        return state.robbers_evaluate(depth, tt, rtt, rng) == Victor::Cop;
+    }
+
+    if state.did_cop_win() {
+        return true;
+    }
+
+    let info = match compute_components(state) {
+        Some(info) => info,
+        None => return false,
+    };
+
+    let threats = info.adj[info.comp[0] as usize][info.comp[1] as usize] as usize;
+    if threats > picks_left {
+        return false;
+    }
+
+    let mut raw_edges = [(0usize, 0usize); MAX_EDGES];
+    let mut n_edges = 0;
+    for (u, v) in state.remaining_edges() {
+        if info.comp[u] == info.comp[v] {
+            continue;
+        }
+        raw_edges[n_edges] = (u, v);
+        n_edges += 1;
+    }
+    shuffle(&mut raw_edges[..n_edges], rng);
+    let mut edges = [(0usize, 0usize); MAX_EDGES];
+    sort_edges_by_score(&raw_edges, n_edges, &info, &mut edges);
+
+    let mut seen_pair = [[false; MAX_COMP]; MAX_COMP];
+    for &(u, v) in &edges[..n_edges] {
+        let cu = info.comp[u] as usize;
+        let cv = info.comp[v] as usize;
+        let (lo, hi) = if cu <= cv { (cu, cv) } else { (cv, cu) };
+        if seen_pair[lo][hi] {
+            continue;
+        }
+        seen_pair[lo][hi] = true;
+
+        let mut next = *state;
+        next.cop.add_edge(u, v);
+        if next.cop_step(picks_left - 1, depth, tt, rtt, rng) == Victor::Cop {
+            line.push((u, v));
+            if extend_winning_cop_turn(&next, picks_left - 1, depth, tt, rtt, rng, line) {
+                return true;
+            }
+            line.pop();
+        }
+    }
+
+    false
 }
 
 // ============================================================
@@ -1421,6 +1685,116 @@ fn run<const K: u8, const COPS: usize>() {
     println!("{victor:?} wins in {elapsed:.1}s  (nodes: {nodes}, cop_tt: {hits}/{stores}, rob_tt: {rhits}/{rstores})");
 }
 
+fn run_interactive<const K: u8, const COPS: usize>() {
+    let mut state = GameState::<K, COPS>::new();
+    let tt = TranspositionTable::new(TT_SIZE_LOG2);
+    let rtt = TranspositionTable::new(TT_SIZE_LOG2.saturating_sub(2).max(16));
+    let mut rng = Prng::new(1337);
+    let mut turn = 1usize;
+
+    println!(
+        "Interactive mode: robber enters one edge as `u v` on K{} with {} cops.",
+        K, COPS
+    );
+
+    reset_counters();
+    let start = Instant::now();
+    let Some(opening_turn) = find_winning_cop_turn(&state, &tt, &rtt, &mut rng) else {
+        let elapsed = start.elapsed().as_secs_f64();
+        let nodes = NODES_EVALUATED.load(Ordering::Relaxed);
+        println!("No winning opening cop response found in {elapsed:.1}s  (nodes: {nodes})");
+        return;
+    };
+    for &(cu, cv) in &opening_turn {
+        state.cop.add_edge(cu, cv);
+    }
+    let elapsed = start.elapsed().as_secs_f64();
+    let nodes = NODES_EVALUATED.load(Ordering::Relaxed);
+    let opening_moves = opening_turn
+        .iter()
+        .map(|&(cu, cv)| format!("({cu}, {cv})"))
+        .join(", ");
+    println!("cop opens with {opening_moves}");
+    println!("computed in {elapsed:.1}s  (nodes: {nodes})");
+
+    if state.did_cop_win() {
+        println!("Cop has secured the win.");
+        return;
+    }
+
+    loop {
+        print!("robber move #{turn}> ");
+        io::stdout().flush().unwrap();
+
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_err() {
+            eprintln!("Failed to read input.");
+            return;
+        }
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+
+        let parts: Vec<_> = input.split_whitespace().collect();
+        if parts.len() != 2 {
+            eprintln!("Enter robber moves as `u v`.");
+            continue;
+        }
+        let Ok(mut u) = parts[0].parse::<usize>() else {
+            eprintln!("Invalid vertex: {}", parts[0]);
+            continue;
+        };
+        let Ok(mut v) = parts[1].parse::<usize>() else {
+            eprintln!("Invalid vertex: {}", parts[1]);
+            continue;
+        };
+        if u > v {
+            std::mem::swap(&mut u, &mut v);
+        }
+        if !legal_robber_move(&state, u, v) {
+            eprintln!("Illegal robber move: ({u}, {v})");
+            continue;
+        }
+
+        state.robber.add_edge(u, v);
+        println!("robber plays ({u}, {v})");
+        if state.did_robber_win() {
+            println!("Robber has already won.");
+            return;
+        }
+
+        reset_counters();
+        let start = Instant::now();
+        let Some(cop_turn) = find_winning_cop_turn(&state, &tt, &rtt, &mut rng) else {
+            let elapsed = start.elapsed().as_secs_f64();
+            let nodes = NODES_EVALUATED.load(Ordering::Relaxed);
+            println!("No winning cop response found in {elapsed:.1}s  (nodes: {nodes})");
+            return;
+        };
+
+        for &(cu, cv) in &cop_turn {
+            state.cop.add_edge(cu, cv);
+        }
+
+        let elapsed = start.elapsed().as_secs_f64();
+        let nodes = NODES_EVALUATED.load(Ordering::Relaxed);
+        let cop_moves = cop_turn
+            .iter()
+            .map(|&(cu, cv)| format!("({cu}, {cv})"))
+            .join(", ");
+        println!("cop plays {cop_moves}");
+        println!("computed in {elapsed:.1}s  (nodes: {nodes})");
+
+        if state.did_cop_win() {
+            println!("Cop has secured the win.");
+            return;
+        }
+
+        turn += 1;
+    }
+}
+
 macro_rules! dispatch_cops {
     ($size:literal, $cops:expr, [$($c:literal),+]) => {
         match $cops {
@@ -1430,46 +1804,71 @@ macro_rules! dispatch_cops {
     };
 }
 
+macro_rules! dispatch_interactive_cops {
+    ($size:literal, $cops:expr, [$($c:literal),+]) => {
+        match $cops {
+            $( $c => run_interactive::<$size, $c>(), )+
+            _ => eprintln!("Unsupported cop count: {}. Supported: {}", $cops, stringify!($($c),+)),
+        }
+    };
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let (size, cops) = match args.len() {
+    let interactive = args.get(1).is_some_and(|arg| arg == "interactive");
+    let offset = if interactive { 1 } else { 0 };
+    let (size, cops) = match args.len().saturating_sub(offset) {
         1 => (SIZE as usize, NCOP),
         3 | 4 => {
-            let s = args[1].parse::<usize>().expect("SIZE must be a number");
-            let c = args[2].parse::<usize>().expect("NCOP must be a number");
+            let s = args[1 + offset].parse::<usize>().expect("SIZE must be a number");
+            let c = args[2 + offset].parse::<usize>().expect("NCOP must be a number");
             (s, c)
         }
         _ => {
             eprintln!("Usage: {} [SIZE NCOP [PAR_DEPTH]]", args[0]);
+            eprintln!("Usage: {} interactive SIZE NCOP [PAR_DEPTH]", args[0]);
             eprintln!("  No args: uses compile-time defaults (SIZE={}, NCOP={})", SIZE, NCOP);
             eprintln!("  Example: {} 9 3", args[0]);
             eprintln!("  Example: {} 9 3 0   # serial (no parallelism)", args[0]);
+            eprintln!("  Example: {} interactive 11 4 0", args[0]);
             std::process::exit(1);
         }
     };
 
-    // Set parallel depth: from 4th arg, or compile-time default
-    let par_depth = args.get(3)
+    let par_depth = args.get(3 + offset)
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(PAR_MAX_DEPTH_DEFAULT);
     PAR_DEPTH.store(par_depth, Ordering::Relaxed);
 
-    // Dispatch to monomorphized versions (sizes 3-16, cops 1-6)
-    match size {
-        3  => dispatch_cops!( 3, cops, [1,2,3,4,5,6]),
-        4  => dispatch_cops!( 4, cops, [1,2,3,4,5,6]),
-        5  => dispatch_cops!( 5, cops, [1,2,3,4,5,6]),
-        6  => dispatch_cops!( 6, cops, [1,2,3,4,5,6]),
-        7  => dispatch_cops!( 7, cops, [1,2,3,4,5,6]),
-        8  => dispatch_cops!( 8, cops, [1,2,3,4,5,6]),
-        9  => dispatch_cops!( 9, cops, [1,2,3,4,5,6]),
-        10 => dispatch_cops!(10, cops, [1,2,3,4,5,6]),
-        11 => dispatch_cops!(11, cops, [1,2,3,4,5,6]),
-        12 => dispatch_cops!(12, cops, [1,2,3,4,5,6]),
-        13 => dispatch_cops!(13, cops, [1,2,3,4,5,6]),
-        14 => dispatch_cops!(14, cops, [1,2,3,4,5,6]),
-        15 => dispatch_cops!(15, cops, [1,2,3,4,5,6]),
-        16 => dispatch_cops!(16, cops, [1,2,3,4,5,6]),
-        _  => eprintln!("Unsupported graph size: {}. Supported: 3-16", size),
+    match (interactive, size) {
+        (false, 3)  => dispatch_cops!( 3, cops, [1,2,3,4,5,6]),
+        (false, 4)  => dispatch_cops!( 4, cops, [1,2,3,4,5,6]),
+        (false, 5)  => dispatch_cops!( 5, cops, [1,2,3,4,5,6]),
+        (false, 6)  => dispatch_cops!( 6, cops, [1,2,3,4,5,6]),
+        (false, 7)  => dispatch_cops!( 7, cops, [1,2,3,4,5,6]),
+        (false, 8)  => dispatch_cops!( 8, cops, [1,2,3,4,5,6]),
+        (false, 9)  => dispatch_cops!( 9, cops, [1,2,3,4,5,6]),
+        (false, 10) => dispatch_cops!(10, cops, [1,2,3,4,5,6]),
+        (false, 11) => dispatch_cops!(11, cops, [1,2,3,4,5,6]),
+        (false, 12) => dispatch_cops!(12, cops, [1,2,3,4,5,6]),
+        (false, 13) => dispatch_cops!(13, cops, [1,2,3,4,5,6]),
+        (false, 14) => dispatch_cops!(14, cops, [1,2,3,4,5,6]),
+        (false, 15) => dispatch_cops!(15, cops, [1,2,3,4,5,6]),
+        (false, 16) => dispatch_cops!(16, cops, [1,2,3,4,5,6]),
+        (true, 3)  => dispatch_interactive_cops!( 3, cops, [1,2,3,4,5,6]),
+        (true, 4)  => dispatch_interactive_cops!( 4, cops, [1,2,3,4,5,6]),
+        (true, 5)  => dispatch_interactive_cops!( 5, cops, [1,2,3,4,5,6]),
+        (true, 6)  => dispatch_interactive_cops!( 6, cops, [1,2,3,4,5,6]),
+        (true, 7)  => dispatch_interactive_cops!( 7, cops, [1,2,3,4,5,6]),
+        (true, 8)  => dispatch_interactive_cops!( 8, cops, [1,2,3,4,5,6]),
+        (true, 9)  => dispatch_interactive_cops!( 9, cops, [1,2,3,4,5,6]),
+        (true, 10) => dispatch_interactive_cops!(10, cops, [1,2,3,4,5,6]),
+        (true, 11) => dispatch_interactive_cops!(11, cops, [1,2,3,4,5,6]),
+        (true, 12) => dispatch_interactive_cops!(12, cops, [1,2,3,4,5,6]),
+        (true, 13) => dispatch_interactive_cops!(13, cops, [1,2,3,4,5,6]),
+        (true, 14) => dispatch_interactive_cops!(14, cops, [1,2,3,4,5,6]),
+        (true, 15) => dispatch_interactive_cops!(15, cops, [1,2,3,4,5,6]),
+        (true, 16) => dispatch_interactive_cops!(16, cops, [1,2,3,4,5,6]),
+        (_, _)  => eprintln!("Unsupported graph size: {}. Supported: 3-16", size),
     }
 }
