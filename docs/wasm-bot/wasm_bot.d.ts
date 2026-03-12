@@ -5,12 +5,15 @@ export function cop_best_move_wasm(k: number, n: number, blue_edges_flat: Uint8A
 
 export function init_panic_hook(): void;
 
+export function robber_best_move_wasm(k: number, n: number, blue_edges_flat: Uint8Array, red_edges_flat: Uint8Array): Int32Array;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly cop_best_move_wasm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
     readonly init_panic_hook: () => void;
+    readonly robber_best_move_wasm: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

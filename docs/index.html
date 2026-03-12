@@ -496,7 +496,7 @@
   </div>
 
   <script type="module">
-    import initWasm, { cop_best_move_wasm } from './wasm-bot/wasm_bot.js';
+    import initWasm, { cop_best_move_wasm, robber_best_move_wasm } from './wasm-bot/wasm_bot.js';
     await initWasm();
 
     // --- Model ----------------------------------------------------------------
@@ -5565,6 +5565,23 @@
     }
 
     function robberBestMoveDeep(state, cfg) {
+      if (typeof robber_best_move_wasm !== 'undefined') {
+        const blues = [];
+        for (const key of state.blue) {
+          const [u, v] = parseEdgeKey(key);
+          blues.push(u, v);
+        }
+        const reds = [];
+        for (const key of state.red) {
+          const [u, v] = parseEdgeKey(key);
+          reds.push(u, v);
+        }
+        const res = robber_best_move_wasm(state.k, state.n, new Uint8Array(blues), new Uint8Array(reds));
+        if (res && res.length >= 2) {
+          return { u: res[0], v: res[1] };
+        }
+      }
+
       const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
       const search = {
         cfg,

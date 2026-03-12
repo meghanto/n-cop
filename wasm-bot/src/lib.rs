@@ -34,6 +34,25 @@ impl AdjMatrix {
         (self.rows[u] & (1 << v)) != 0
     }
     
+    fn get_component(&self, start: usize) -> u16 {
+        let mut visited: u16 = 1 << start;
+        let mut frontier: u16 = 1 << start;
+        
+        while frontier != 0 {
+            let mut next_frontier: u16 = 0;
+            let mut f = frontier;
+            while f != 0 {
+                let bit = f.trailing_zeros() as usize;
+                next_frontier |= self.rows[bit];
+                f &= f - 1;
+            }
+            next_frontier &= !visited;
+            visited |= next_frontier;
+            frontier = next_frontier;
+        }
+        visited
+    }
+
     fn is_0_1_connected(&self) -> bool {
         let mut visited: u16 = 1;
         let mut frontier: u16 = 1;
@@ -226,6 +245,68 @@ impl Searcher {
         if state.did_cop_win() { return COP_WIN + depth; }
         if state.did_robber_win() { return ROBBER_WIN - depth; }
 
+        let mut comp_map = [0; 16];
+        let mut visited = 0;
+        for i in 0..state.k as usize {
+            if (visited & (1 << i)) == 0 {
+                let comp = state.red.get_component(i);
+                visited |= comp;
+                let mut f = comp;
+                while f != 0 {
+                    let b = f.trailing_zeros() as usize;
+                    comp_map[b] = i;
+                    f &= f - 1;
+                }
+            }
+        }
+        
+        let root0 = comp_map[0];
+        let root1 = comp_map[1];
+
+        let mut threats = 0;
+        let mut e0 = [0i32; 16]; 
+        let mut e1 = [0i32; 16]; 
+
+        let mask = (1 << state.k) - 1;
+        for u in 0..state.k as usize {
+            let cu = comp_map[u];
+            let mut avail = mask & !state.blue.rows[u] & !state.red.rows[u];
+            avail &= !((1 << (u + 1)) - 1); // Only count each edge once
+            while avail != 0 {
+                let v = avail.trailing_zeros() as usize;
+                let cv = comp_map[v];
+                
+                if (cu == root0 && cv == root1) || (cu == root1 && cv == root0) {
+                    threats += 1;
+                } else if cu == root0 {
+                    e0[cv] += 1;
+                } else if cv == root0 {
+                    e0[cu] += 1;
+                } else if cu == root1 {
+                    e1[cv] += 1;
+                } else if cv == root1 {
+                    e1[cu] += 1;
+                }
+                avail &= avail - 1;
+            }
+        }
+        
+        let effective_picks = if is_cop { picks_left as i32 } else { 0 };
+        
+        let mut required_picks = threats;
+        for i in 0..state.k as usize {
+            if comp_map[i] == i && i != root0 && i != root1 {
+                let cost0 = e0[i];
+                let cost1 = e1[i];
+                let cost_both = std::cmp::max(0, e0[i] - state.n as i32) + std::cmp::max(0, e1[i] - state.n as i32);
+                required_picks += cost0.min(cost1).min(cost_both);
+            }
+        }
+
+        if required_picks > effective_picks {
+            return ROBBER_WIN - depth;
+        }
+
         if depth == 0 {
             return state.eval_cop();
         }
@@ -380,6 +461,24 @@ pub fn cop_best_move_wasm(k: u8, n: usize, blue_edges_flat: &[u8], red_edges_fla
         state.red.add_edge(red_edges_flat[i] as usize, red_edges_flat[i+1] as usize);
     }
 
+    let mut comp_map = [0; 16];
+    let mut visited = 0;
+    for i in 0..state.k as usize {
+        if (visited & (1 << i)) == 0 {
+            let comp = state.red.get_component(i);
+            visited |= comp;
+            let mut f = comp;
+            while f != 0 {
+                let b = f.trailing_zeros() as usize;
+                comp_map[b] = i;
+                f &= f - 1;
+            }
+        }
+    }
+    
+    let root0 = comp_map[0];
+    let root1 = comp_map[1];
+
     let mut edges = state.remaining_edges();
     if edges.is_empty() {
         return js_sys::Int32Array::new_with_length(0);
@@ -388,13 +487,15 @@ pub fn cop_best_move_wasm(k: u8, n: usize, blue_edges_flat: &[u8], red_edges_fla
     // Heuristic sort: evaluate cop flow, but hardcode priority for 0-1 edges to prevent truncation blindspots!
     edges.sort_by_key(|&(u, v)| {
         let mut score = 0;
+        let cu = comp_map[u];
+        let cv = comp_map[v];
         
-        // HIGHEST priority: the direct edge 0-1
-        if (u == 0 && v == 1) || (u == 1 && v == 0) {
+        // HIGHEST priority: the direct threat edges between components containing 0 and 1
+        if (cu == root0 && cv == root1) || (cu == root1 && cv == root0) {
             score += 1000000;
         } 
-        // HIGH priority: incident to 0 or 1
-        else if u <= 1 || v <= 1 {
+        // HIGH priority: incident to 0 or 1's component
+        else if cu == root0 || cu == root1 || cv == root0 || cv == root1 {
             score += 50000;
         }
         
@@ -424,10 +525,15 @@ pub fn cop_best_move_wasm(k: u8, n: usize, blue_edges_flat: &[u8], red_edges_fla
         top_candidates.push(*e);
     }
     
-    // Always guarantee the direct edge is in the pool if it's available!
-    let direct_edge = (0, 1);
-    if state.remaining_edges().contains(&direct_edge) && !top_candidates.contains(&direct_edge) {
-        top_candidates.push(direct_edge);
+    // Always guarantee any direct threat edges are in the pool!
+    for &(u, v) in &edges {
+        let cu = comp_map[u];
+        let cv = comp_map[v];
+        if (cu == root0 && cv == root1) || (cu == root1 && cv == root0) {
+            if !top_candidates.contains(&(u, v)) {
+                top_candidates.push((u, v));
+            }
+        }
     }
 
     let subsets = generate_subsets(&top_candidates, n);
@@ -483,6 +589,246 @@ pub fn cop_best_move_wasm(k: u8, n: usize, blue_edges_flat: &[u8], red_edges_fla
     for (i, &(u, v)) in best_move.iter().enumerate() {
         arr.set_index((i * 2) as u32, u as i32);
         arr.set_index((i * 2 + 1) as u32, v as i32);
+    }
+    arr
+}
+
+#[wasm_bindgen]
+pub fn robber_best_move_wasm(k: u8, n: usize, blue_edges_flat: &[u8], red_edges_flat: &[u8]) -> js_sys::Int32Array {
+    let mut state = GameState {
+        k,
+        n,
+        blue: AdjMatrix::new(),
+        red: AdjMatrix::new(),
+    };
+
+    for i in (0..blue_edges_flat.len()).step_by(2) {
+        state.blue.add_edge(blue_edges_flat[i] as usize, blue_edges_flat[i+1] as usize);
+    }
+    for i in (0..red_edges_flat.len()).step_by(2) {
+        state.red.add_edge(red_edges_flat[i] as usize, red_edges_flat[i+1] as usize);
+    }
+    
+    let mut comp_map = [0; 16];
+    let mut visited = 0;
+    for i in 0..state.k as usize {
+        if (visited & (1 << i)) == 0 {
+            let comp = state.red.get_component(i);
+            visited |= comp;
+            let mut f = comp;
+            while f != 0 {
+                let b = f.trailing_zeros() as usize;
+                comp_map[b] = i;
+                f &= f - 1;
+            }
+        }
+    }
+    
+    let root0 = comp_map[0];
+    let root1 = comp_map[1];
+    
+    let mut mu = [[0i32; 16]; 16];
+    let mask = (1 << state.k) - 1;
+    for u in 0..state.k as usize {
+        let cu = comp_map[u];
+        let mut avail = mask & !state.blue.rows[u] & !state.red.rows[u];
+        avail &= !((1 << (u + 1)) - 1);
+        while avail != 0 {
+            let v = avail.trailing_zeros() as usize;
+            let cv = comp_map[v];
+            if cu != cv {
+                mu[cu][cv] += 1;
+                mu[cv][cu] += 1;
+            }
+            avail &= avail - 1;
+        }
+    }
+    
+    let get_any_edge = |a: usize, b: usize| -> Option<(usize, usize)> {
+        for u in 0..state.k as usize {
+            if comp_map[u] == a || comp_map[u] == b {
+                let mut avail = mask & !state.blue.rows[u] & !state.red.rows[u];
+                while avail != 0 {
+                    let v = avail.trailing_zeros() as usize;
+                    if (comp_map[u] == a && comp_map[v] == b) || (comp_map[u] == b && comp_map[v] == a) {
+                        return Some((u, v));
+                    }
+                    avail &= avail - 1;
+                }
+            }
+        }
+        None
+    };
+
+    let m_r = |c: usize, my_mu: &[[i32; 16]; 16]| -> i32 { my_mu[root0][c] };
+    let m_t = |c: usize, my_mu: &[[i32; 16]; 16]| -> i32 { my_mu[root1][c] };
+    
+    let gamma_t = |c: usize, my_mu: &[[i32; 16]; 16]| -> i32 {
+        let mut sum = 0;
+        for d in 0..state.k as usize {
+            if comp_map[d] == d && d != root0 && d != root1 && d != c {
+                sum += my_mu[c][d] * m_r(d, my_mu);
+            }
+        }
+        sum
+    };
+    
+    let gamma_r = |c: usize, my_mu: &[[i32; 16]; 16]| -> i32 {
+        let mut sum = 0;
+        for d in 0..state.k as usize {
+            if comp_map[d] == d && d != root0 && d != root1 && d != c {
+                sum += my_mu[c][d] * m_t(d, my_mu);
+            }
+        }
+        sum
+    };
+    
+    let sigma = |c: usize, my_mu: &[[i32; 16]; 16]| -> i32 {
+        let mr = m_r(c, my_mu);
+        let mt = m_t(c, my_mu);
+        let c3 = std::cmp::max(0, mr - n as i32) + std::cmp::max(0, mt - n as i32);
+        mr.min(mt).min(c3)
+    };
+    
+    let lambda_after_move = |new_mu: &[[i32; 16]; 16]| -> i32 {
+        let mut max_val = 0;
+        for x in 0..state.k as usize {
+            if comp_map[x] == x && x != root0 && x != root1 {
+                max_val = max_val.max(m_r(x, new_mu).max(m_t(x, new_mu)));
+            }
+        }
+        max_val
+    };
+
+    let mut o_comps = Vec::new();
+    for i in 0..state.k as usize {
+        if comp_map[i] == i && i != root0 && i != root1 {
+            o_comps.push(i);
+        }
+    }
+    
+    if mu[root0][root1] > 0 {
+        if let Some(e) = get_any_edge(root0, root1) {
+            let arr = js_sys::Int32Array::new_with_length(2);
+            arr.set_index(0, e.0 as i32);
+            arr.set_index(1, e.1 as i32);
+            return arr;
+        }
+    }
+    
+    let mut best_move = None;
+    let mut best_score = -1_000_000_000;
+    let mut best_tiebreak = -1_000_000_000;
+    
+    for &c in &o_comps {
+        if m_t(c, &mu) > 0 {
+            let mut s = -1_000_000_000;
+            if m_r(c, &mu) > n as i32 {
+                s = 1_000_000_000;
+            } else {
+                let mut new_mu = mu.clone();
+                for d in 0..state.k as usize {
+                    if d != c && d != root1 {
+                        new_mu[root1][d] += new_mu[c][d];
+                        new_mu[d][root1] += new_mu[c][d];
+                        new_mu[c][d] = 0;
+                        new_mu[d][c] = 0;
+                    }
+                }
+                new_mu[c][root1] = 0; new_mu[root1][c] = 0;
+                
+                let lambda = lambda_after_move(&new_mu);
+                s = gamma_t(c, &mu) - m_r(c, &mu) * m_t(c, &mu) - (n as i32 - m_r(c, &mu)) * lambda;
+            }
+            if s > best_score {
+                best_score = s;
+                best_move = Some(("absorb_T", c, c));
+                best_tiebreak = -1_000_000_000;
+            }
+        }
+        
+        if m_r(c, &mu) > 0 {
+            let mut s = -1_000_000_000;
+            if m_t(c, &mu) > n as i32 {
+                s = 1_000_000_000;
+            } else {
+                let mut new_mu = mu.clone();
+                for d in 0..state.k as usize {
+                    if d != c && d != root0 {
+                        new_mu[root0][d] += new_mu[c][d];
+                        new_mu[d][root0] += new_mu[c][d];
+                        new_mu[c][d] = 0;
+                        new_mu[d][c] = 0;
+                    }
+                }
+                new_mu[c][root0] = 0; new_mu[root0][c] = 0;
+                
+                let lambda = lambda_after_move(&new_mu);
+                s = gamma_r(c, &mu) - m_r(c, &mu) * m_t(c, &mu) - (n as i32 - m_t(c, &mu)) * lambda;
+            }
+            if s > best_score {
+                best_score = s;
+                best_move = Some(("absorb_R", c, c));
+                best_tiebreak = -1_000_000_000;
+            }
+        }
+    }
+    
+    for i in 0..o_comps.len() {
+        for j in i+1..o_comps.len() {
+            let a = o_comps[i];
+            let b = o_comps[j];
+            if mu[a][b] > 0 {
+                let c_val = m_r(a, &mu) * m_t(b, &mu) + m_t(a, &mu) * m_r(b, &mu);
+                
+                let mut new_mu = mu.clone();
+                for d in 0..state.k as usize {
+                    if d != a && d != b {
+                        new_mu[a][d] += new_mu[b][d];
+                        new_mu[d][a] += new_mu[b][d];
+                        new_mu[b][d] = 0;
+                        new_mu[d][b] = 0;
+                    }
+                }
+                new_mu[a][b] = 0; new_mu[b][a] = 0;
+                
+                let lambda = lambda_after_move(&new_mu);
+                let s = c_val - (n as i32) * lambda;
+                let tiebreak = sigma(a, &new_mu);
+                
+                if s > best_score {
+                    best_score = s;
+                    best_tiebreak = tiebreak;
+                    best_move = Some(("merge", a, b));
+                } else if s == best_score && tiebreak > best_tiebreak {
+                    best_tiebreak = tiebreak;
+                    best_move = Some(("merge", a, b));
+                }
+            }
+        }
+    }
+    
+    let arr = js_sys::Int32Array::new_with_length(2);
+    if let Some((kind, a, b)) = best_move {
+        let edge = match kind {
+            "absorb_T" => get_any_edge(a, root1),
+            "absorb_R" => get_any_edge(a, root0),
+            "merge" => get_any_edge(a, b),
+            _ => None
+        };
+        if let Some(e) = edge {
+            arr.set_index(0, e.0 as i32);
+            arr.set_index(1, e.1 as i32);
+            return arr;
+        }
+    }
+    
+    let edges = state.remaining_edges();
+    if !edges.is_empty() {
+        arr.set_index(0, edges[0].0 as i32);
+        arr.set_index(1, edges[0].1 as i32);
+    } else {
+        return js_sys::Int32Array::new_with_length(0);
     }
     arr
 }

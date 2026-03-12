@@ -21,6 +21,22 @@ export function init_panic_hook() {
     wasm.init_panic_hook();
 }
 
+/**
+ * @param {number} k
+ * @param {number} n
+ * @param {Uint8Array} blue_edges_flat
+ * @param {Uint8Array} red_edges_flat
+ * @returns {Int32Array}
+ */
+export function robber_best_move_wasm(k, n, blue_edges_flat, red_edges_flat) {
+    const ptr0 = passArray8ToWasm0(blue_edges_flat, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(red_edges_flat, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.robber_best_move_wasm(k, n, ptr0, len0, ptr1, len1);
+    return ret;
+}
+
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
