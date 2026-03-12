@@ -7,8 +7,8 @@
 #define K 9
 #define COPS 3
 #define THREADS_PER_BLOCK 256
-// 128 MB state buffer handles ~4 million states per expansion array
-#define MAX_STATES_PER_LAYER 4000000
+#define TT_SIZE_LOG2 26
+#define TT_ENTRIES (1ULL << TT_SIZE_LOG2)
 
 struct AdjMatrix {
     uint16_t rows[16];
@@ -61,54 +61,100 @@ __device__ __host__ bool is_0_1_connected(const AdjMatrix* m) {
     return (visited & 2) != 0;
 }
 
-// Memory-efficient state (32 bytes per node)
-struct GameState {
-    AdjMatrix blue;
-    AdjMatrix red;
+struct TTEntry {
+    uint64_t word0;
+    uint64_t word1;
 };
 
-// ---------------------------------------------------------------------------------------
-// GPU BFS Kernel
-// ---------------------------------------------------------------------------------------
-__global__ void expand_layer_kernel(
-    const GameState* in_states, 
-    int num_in_states, 
-    GameState* out_states, 
-    unsigned int* out_count, 
-    int* terminal_evals, 
-    bool is_cop
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_in_states) return;
-    
-    GameState state = in_states[idx];
-    
-    // Check Robber win (already connected)
-    if (is_0_1_connected(&state.red)) {
-        terminal_evals[idx] = -1; // Robber wins
-        return;
+__device__ uint64_t splitmix64(uint64_t z) {
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+}
+
+__device__ void get_hash(const AdjMatrix* blue, const AdjMatrix* red, bool is_cop, int picks_left, uint64_t* h0, uint64_t* h1) {
+    uint64_t state_hash = 0;
+    for(int i=0; i<K; i++) {
+        state_hash ^= ((uint64_t)blue->rows[i]) << (i*2);
+        state_hash ^= ((uint64_t)red->rows[i]) << (i*2 + 1);
     }
+    if (is_cop) state_hash ^= 0x123456789ABCDEF0ULL;
+    state_hash ^= ((uint64_t)picks_left << 48);
     
-    // Check Cop win (graph disconnected and no way to reconnect)
+    *h0 = splitmix64(state_hash);
+    *h1 = splitmix64(state_hash ^ 0x517cc1b727220a95ULL);
+}
+
+__device__ void tt_store(TTEntry* tt, uint64_t h0, uint64_t h1, int score, int flag, int depth) {
+    uint64_t idx = h0 & (TT_ENTRIES - 1);
+    
+    uint64_t s = score + 1; // map -1,0,1 to 0,1,2
+    uint64_t f = flag; // 0=exact, 1=lower, 2=upper
+    uint64_t d = depth;
+    
+    uint64_t payload = (s & 0xFF) | ((f & 0x3) << 8) | ((d & 0x3F) << 10);
+    
+    uint64_t word0 = (h0 & ~0xFFFFULL) | payload;
+    if (word0 == 0) word0 = 1; // prevent 0
+    uint64_t word1 = h1 ^ word0;
+    
+    tt[idx].word0 = word0;
+    tt[idx].word1 = word1;
+}
+
+__device__ bool tt_probe(TTEntry* tt, uint64_t h0, uint64_t h1, int* score, int* flag, int depth) {
+    uint64_t idx = h0 & (TT_ENTRIES - 1);
+    uint64_t word0 = tt[idx].word0;
+    if (word0 == 0) return false;
+    
+    uint64_t word1 = tt[idx].word1;
+    
+    if ((word0 & ~0xFFFFULL) == (h0 & ~0xFFFFULL) && (word1 ^ word0) == h1) {
+        int d = (word0 >> 10) & 0x3F;
+        if (d >= depth) {
+            *score = (int)(word0 & 0xFF) - 1;
+            *flag = (word0 >> 8) & 0x3;
+            return true;
+        }
+    }
+    return false;
+}
+
+__device__ unsigned long long nodes_evaluated = 0;
+
+__device__ int device_alpha_beta(AdjMatrix blue, AdjMatrix red, int depth, int alpha, int beta, bool is_cop, int picks_left, TTEntry* tt) {
+    atomicAdd(&nodes_evaluated, 1);
+    
+    if (is_0_1_connected(&red)) return -1;
+    
     AdjMatrix available;
     init_matrix(&available);
     uint16_t mask = (1 << K) - 1;
-    for(int i = 0; i < K; i++) {
-        available.rows[i] = mask & ~(state.blue.rows[i]) & ~(1 << i);
+    for(int i=0; i<K; i++) {
+        available.rows[i] = mask & ~(blue.rows[i]) & ~(1 << i);
     }
-    if (!is_0_1_connected(&available)) {
-        terminal_evals[idx] = 1; // Cop wins
-        return;
+    if (!is_0_1_connected(&available)) return 1; 
+    
+    if (depth <= 0) return 0; 
+    
+    uint64_t h0, h1;
+    get_hash(&blue, &red, is_cop, picks_left, &h0, &h1);
+    
+    int tt_score, tt_flag;
+    if (tt_probe(tt, h0, h1, &tt_score, &tt_flag, depth)) {
+        if (tt_flag == 0) return tt_score;
+        if (tt_flag == 1 && tt_score > alpha) alpha = tt_score;
+        if (tt_flag == 2 && tt_score < beta) beta = tt_score;
+        if (alpha >= beta) return tt_score;
     }
     
-    // Generate legal moves
     uint8_t edges_u[120];
     uint8_t edges_v[120];
     int num_edges = 0;
     
     for (int u = 0; u < K; u++) {
-        uint16_t avail = mask & ~state.blue.rows[u] & ~state.red.rows[u];
-        avail &= ~((1 << (u + 1)) - 1); // Only count u < v
+        uint16_t avail = mask & ~blue.rows[u] & ~red.rows[u];
+        avail &= ~((1 << (u + 1)) - 1); 
         while (avail != 0) {
             int v = __ffs(avail) - 1;
             if (num_edges < 120 && v >= 0 && v < 16) {
@@ -120,38 +166,82 @@ __global__ void expand_layer_kernel(
         }
     }
     
-    if (num_edges == 0) {
-        terminal_evals[idx] = 1; // Cop wins by default if board fills up
-        return;
-    }
+    if (num_edges == 0) return 1; 
     
-    terminal_evals[idx] = 0; // State is active, pushing children
+    int orig_alpha = alpha;
+    int best;
     
-    // Since this is true BFS, one parent state generates `num_edges` children.
-    // We use an atomic add on `out_count` to dynamically allocate a chunk of the output array.
-    unsigned int write_idx = atomicAdd(out_count, num_edges);
-    
-    // If the output array is full, we must abort writing children to prevent memory corruption!
-    if (write_idx + num_edges >= MAX_STATES_PER_LAYER) {
-        // Fallback: This thread aborts pushing to avoid overflow. 
-        // In a production engine, you'd use chunked buffers, but for now we clamp.
-        return; 
-    }
-    
-    for (int i = 0; i < num_edges; i++) {
-        GameState child = state;
-        if (is_cop) {
-            add_edge(&child.blue, edges_u[i], edges_v[i]);
-        } else {
-            add_edge(&child.red, edges_u[i], edges_v[i]);
+    if (is_cop) {
+        best = -999;
+        for (int i = 0; i < num_edges; i++) {
+            AdjMatrix next_blue = blue;
+            add_edge(&next_blue, edges_u[i], edges_v[i]);
+            
+            int score;
+            if (picks_left > 1) {
+                score = device_alpha_beta(next_blue, red, depth, alpha, beta, true, picks_left - 1, tt);
+            } else {
+                score = device_alpha_beta(next_blue, red, depth - 1, alpha, beta, false, 0, tt);
+            }
+            
+            if (score > best) best = score;
+            if (best > alpha) alpha = best;
+            if (alpha >= beta) break; 
         }
-        out_states[write_idx + i] = child;
+    } else {
+        best = 999;
+        for (int i = 0; i < num_edges; i++) {
+            AdjMatrix next_red = red;
+            add_edge(&next_red, edges_u[i], edges_v[i]);
+            
+            int score = device_alpha_beta(blue, next_red, depth - 1, alpha, beta, true, COPS, tt);
+            
+            if (score < best) best = score;
+            if (best < beta) beta = best;
+            if (alpha >= beta) break; 
+        }
     }
+    
+    int flag = 0; 
+    if (best <= orig_alpha) flag = 2; // upperbound
+    else if (best >= beta) flag = 1; // lowerbound
+    
+    tt_store(tt, h0, h1, best, flag, depth);
+    return best;
 }
 
-// ---------------------------------------------------------------------------------------
-// CPU Host Code
-// ---------------------------------------------------------------------------------------
+struct Job {
+    AdjMatrix blue;
+    AdjMatrix red;
+    bool is_cop;
+    int picks_left;
+};
+
+__global__ void evaluate_jobs_kernel(Job* jobs, int* results, int num_jobs, TTEntry* tt, int max_depth) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_jobs) return;
+    
+    Job j = jobs[idx];
+    // Each root job explores with full Alpha-Beta window (-999, 999)
+    results[idx] = device_alpha_beta(j.blue, j.red, max_depth, -999, 999, j.is_cop, j.picks_left, tt);
+}
+
+struct Edge { int u, v; };
+
+std::vector<Edge> get_remaining_edges(const AdjMatrix& blue, const AdjMatrix& red) {
+    std::vector<Edge> edges;
+    uint16_t mask = (1 << K) - 1;
+    for (int u = 0; u < K; u++) {
+        uint16_t avail = mask & ~blue.rows[u] & ~red.rows[u];
+        avail &= ~((1 << (u + 1)) - 1); 
+        while (avail != 0) {
+            int v = host_ffs(avail) - 1;
+            edges.push_back({u, v});
+            avail &= avail - 1;
+        }
+    }
+    return edges;
+}
 
 double get_time() {
     struct timeval tv;
@@ -160,101 +250,120 @@ double get_time() {
 }
 
 int main() {
-    printf("Initializing n-cop GPU BFS Solver for K%d (%d Cops)\n", K, COPS);
+    printf("Initializing GPU Parallel Alpha-Beta Solver for K%d (%d Cops)\n", K, COPS);
     
-    // Allocate device memory for ping-pong buffering
-    size_t state_bytes = MAX_STATES_PER_LAYER * sizeof(GameState);
-    printf("Allocating %.2f MB for ping-pong state buffers...\n", (2 * state_bytes) / (1024.0 * 1024.0));
+    AdjMatrix root_blue, root_red;
+    init_matrix(&root_blue);
+    init_matrix(&root_red);
     
-    GameState *d_states_A, *d_states_B;
-    cudaMalloc(&d_states_A, state_bytes);
-    cudaMalloc(&d_states_B, state_bytes);
+    std::vector<Job> jobs;
+    std::vector<Edge> edges = get_remaining_edges(root_blue, root_red);
     
-    int* d_terminals;
-    cudaMalloc(&d_terminals, MAX_STATES_PER_LAYER * sizeof(int));
-    
-    unsigned int* d_out_count;
-    cudaMalloc(&d_out_count, sizeof(unsigned int));
-    
-    // Setup initial state (Empty K9 board)
-    GameState root;
-    init_matrix(&root.blue);
-    init_matrix(&root.red);
-    
-    cudaMemcpy(d_states_A, &root, sizeof(GameState), cudaMemcpyHostToDevice);
-    
-    int current_layer_size = 1;
-    bool is_cop_turn = true;
-    int depth = 0;
-    
-    // Ping pong pointers
-    GameState* d_in = d_states_A;
-    GameState* d_out = d_states_B;
-    
-    double t0 = get_time();
-    
-    while (current_layer_size > 0 && depth < 20) {
-        printf("\n[Depth %d] Expanding %d states (Turn: %s)...\n", 
-               depth, current_layer_size, is_cop_turn ? "Cop" : "Robber");
-               
-        // Reset output counter
-        unsigned int zero = 0;
-        cudaMemcpy(d_out_count, &zero, sizeof(unsigned int), cudaMemcpyHostToDevice);
-        
-        int blocks = (current_layer_size + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-        
-        // Launch BFS expansion!
-        expand_layer_kernel<<<blocks, THREADS_PER_BLOCK>>>(
-            d_in, 
-            current_layer_size, 
-            d_out, 
-            d_out_count, 
-            d_terminals, 
-            is_cop_turn
-        );
-        cudaDeviceSynchronize();
-        
-        // Retrieve number of newly generated children
-        unsigned int next_layer_size = 0;
-        cudaMemcpy(&next_layer_size, d_out_count, sizeof(unsigned int), cudaMemcpyDeviceToHost);
-        
-        // Check for memory overflow
-        if (next_layer_size >= MAX_STATES_PER_LAYER) {
-            printf("CRITICAL WARNING: Next layer generated %u states, exceeding buffer capacity of %d!\n", 
-                   next_layer_size, MAX_STATES_PER_LAYER);
-            next_layer_size = MAX_STATES_PER_LAYER - 1; // Clamp it
+    // Generate all Cop 1st turn combinations (n=3)
+    if (COPS == 3) {
+        for(int i=0; i<edges.size(); i++) {
+            for(int j=i+1; j<edges.size(); j++) {
+                for(int k=j+1; k<edges.size(); k++) {
+                    Job job;
+                    init_matrix(&job.blue);
+                    init_matrix(&job.red);
+                    add_edge(&job.blue, edges[i].u, edges[i].v);
+                    add_edge(&job.blue, edges[j].u, edges[j].v);
+                    add_edge(&job.blue, edges[k].u, edges[k].v);
+                    job.is_cop = false; 
+                    job.picks_left = 0;
+                    jobs.push_back(job);
+                }
+            }
         }
-        
-        // Retrieve terminal evaluations for the CURRENT layer
-        std::vector<int> terminals(current_layer_size);
-        cudaMemcpy(terminals.data(), d_terminals, current_layer_size * sizeof(int), cudaMemcpyDeviceToHost);
-        
-        int cop_wins = 0, rob_wins = 0, ongoing = 0;
-        for (int r : terminals) {
-            if (r == 1) cop_wins++;
-            else if (r == -1) rob_wins++;
-            else ongoing++;
+    } else if (COPS == 2) {
+        for(int i=0; i<edges.size(); i++) {
+            for(int j=i+1; j<edges.size(); j++) {
+                Job job;
+                init_matrix(&job.blue);
+                init_matrix(&job.red);
+                add_edge(&job.blue, edges[i].u, edges[i].v);
+                add_edge(&job.blue, edges[j].u, edges[j].v);
+                job.is_cop = false; 
+                job.picks_left = 0;
+                jobs.push_back(job);
+            }
         }
-        printf("  -> Terminals found: Cop Wins = %d | Robber Wins = %d | Pushed to next layer: %u\n", 
-               cop_wins, rob_wins, next_layer_size);
-               
-        // Swap buffers
-        GameState* temp = d_in;
-        d_in = d_out;
-        d_out = temp;
-        
-        current_layer_size = next_layer_size;
-        is_cop_turn = !is_cop_turn;
-        depth++;
+    } else {
+        printf("Please manually generate root combinations for COPS != 2 or 3\n");
+        return 1;
     }
     
-    printf("\n=== BFS SEARCH COMPLETE ===\n");
-    printf("Total Execution Time: %.3f seconds.\n", get_time() - t0);
+    int num_jobs = jobs.size();
+    printf("CPU generated %d parallel root jobs (all first-turn Cop combinations).\n", num_jobs);
+
+    size_t tt_bytes = TT_ENTRIES * sizeof(TTEntry);
+    printf("Allocating %.2f GB for Lockless GPU Transposition Table...\n", tt_bytes / (1024.0*1024*1024));
     
-    cudaFree(d_states_A);
-    cudaFree(d_states_B);
-    cudaFree(d_terminals);
-    cudaFree(d_out_count);
+    TTEntry* d_tt;
+    cudaMalloc(&d_tt, tt_bytes);
+    
+    Job* d_jobs;
+    int* d_results;
+    cudaMalloc(&d_jobs, num_jobs * sizeof(Job));
+    cudaMalloc(&d_results, num_jobs * sizeof(int));
+    
+    cudaMemcpy(d_jobs, jobs.data(), num_jobs * sizeof(Job), cudaMemcpyHostToDevice);
+    
+    int blocks = (num_jobs + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    cudaDeviceSetLimit(cudaLimitStackSize, 65536); // Crucial for recursive alpha-beta
+    
+    // Iterative Deepening Loop
+    for (int depth = 1; depth <= 12; depth++) {
+        printf("\n[Depth %d] Launching GPU Alpha-Beta search...\n", depth);
+        if (depth == 1) cudaMemset(d_tt, 0, tt_bytes); // Only clear on first run
+        
+        unsigned long long zero = 0;
+        cudaMemcpyToSymbol(nodes_evaluated, &zero, sizeof(unsigned long long));
+        
+        double t1 = get_time();
+        evaluate_jobs_kernel<<<blocks, THREADS_PER_BLOCK>>>(d_jobs, d_results, num_jobs, d_tt, depth);
+        cudaDeviceSynchronize();
+        double t2 = get_time();
+        
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            printf("CUDA Error: %s\n", cudaGetErrorString(err));
+            return 1;
+        }
+        
+        std::vector<int> results(num_jobs);
+        cudaMemcpy(results.data(), d_results, num_jobs * sizeof(int), cudaMemcpyDeviceToHost);
+        
+        unsigned long long h_nodes = 0;
+        cudaMemcpyFromSymbol(&h_nodes, nodes_evaluated, sizeof(unsigned long long), 0, cudaMemcpyDeviceToHost);
+        
+        int cop_wins = 0, rob_wins = 0, draws = 0;
+        for (int r : results) {
+            if (r == 1) cop_wins++;
+            else if (r == -1) rob_wins++;
+            else draws++;
+        }
+        
+        printf("  -> Cop forced wins: %d | Robber forced wins: %d | Unknowns: %d\n", cop_wins, rob_wins, draws);
+        printf("  -> Time: %.3f seconds | Nodes evaluated: %llu | Throughput: %.2f M nodes/s\n", 
+            t2 - t1, h_nodes, (h_nodes / 1000000.0) / (t2 - t1));
+            
+        // If the Cop wins ANY of the root jobs, the Cop wins the whole game!
+        if (cop_wins > 0) {
+            printf("\n*** COP WINS! Found a winning opening branch at depth %d ***\n", depth);
+            break;
+        }
+        // If the Robber wins ALL of the root jobs, the Robber wins the whole game!
+        if (rob_wins == num_jobs) {
+            printf("\n*** ROBBER WINS! Robber survives all Cop openings at depth %d ***\n", depth);
+            break;
+        }
+    }
+    
+    cudaFree(d_tt);
+    cudaFree(d_jobs);
+    cudaFree(d_results);
     
     return 0;
 }
