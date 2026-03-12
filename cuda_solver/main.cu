@@ -154,29 +154,45 @@ __device__ int device_alpha_beta(AdjMatrix blue, AdjMatrix red, int depth, int a
     
     uint8_t edges_u[120];
     uint8_t edges_v[120];
+    int edge_scores[120];
     int num_edges = 0;
     
-    // Sort edges manually to improve Alpha-Beta cutoffs (Massive speedup)
-    // Edges touching 0 and 1 are vastly more important
     for (int u = 0; u < K; u++) {
         uint16_t avail = mask & ~blue.rows[u] & ~red.rows[u];
         avail &= ~((1 << (u + 1)) - 1); 
         while (avail != 0) {
             int v = __ffs(avail) - 1;
             if (num_edges < 120 && v >= 0 && v < 16) {
-                // Heuristic: put important edges at the front
-                if (u <= 1 || v <= 1) {
-                    // Shift everything right
-                    for(int k = num_edges; k > 0; k--) {
-                        edges_u[k] = edges_u[k-1];
-                        edges_v[k] = edges_v[k-1];
-                    }
-                    edges_u[0] = u;
-                    edges_v[0] = v;
-                } else {
-                    edges_u[num_edges] = u;
-                    edges_v[num_edges] = v;
+                int score = 0;
+                
+                // Extremely greedy edge sorting metric
+                if (u <= 1 && v <= 1) {
+                    score = 10000; // direct 0-1 edge is critical
+                } else if (u <= 1 || v <= 1) {
+                    score = 1000;
                 }
+                
+                // Compute degree in the red graph as a proxy for "growing a component"
+                int red_deg_u = __popc((unsigned int)red.rows[u]);
+                int red_deg_v = __popc((unsigned int)red.rows[v]);
+                score += (red_deg_u + red_deg_v) * 10;
+                
+                // Compute degree in the blue graph as a proxy for "already defended"
+                int blue_deg_u = __popc((unsigned int)blue.rows[u]);
+                int blue_deg_v = __popc((unsigned int)blue.rows[v]);
+                score += (blue_deg_u + blue_deg_v) * 5;
+                
+                // Insertion sort
+                int k = num_edges;
+                while (k > 0 && edge_scores[k-1] < score) {
+                    edges_u[k] = edges_u[k-1];
+                    edges_v[k] = edges_v[k-1];
+                    edge_scores[k] = edge_scores[k-1];
+                    k--;
+                }
+                edges_u[k] = u;
+                edges_v[k] = v;
+                edge_scores[k] = score;
                 num_edges++;
             }
             avail &= avail - 1;
@@ -278,11 +294,15 @@ int main() {
     
     // Sort edges so 0-1 threats are handled first even at the root!
     std::sort(edges.begin(), edges.end(), [](const Edge& a, const Edge& b) {
-        bool a_important = (a.u <= 1 || a.v <= 1);
-        bool b_important = (b.u <= 1 || b.v <= 1);
-        if (a_important && !b_important) return true;
-        if (!a_important && b_important) return false;
-        return false;
+        int a_score = 0;
+        if (a.u <= 1 && a.v <= 1) a_score += 10000;
+        else if (a.u <= 1 || a.v <= 1) a_score += 1000;
+        
+        int b_score = 0;
+        if (b.u <= 1 && b.v <= 1) b_score += 10000;
+        else if (b.u <= 1 || b.v <= 1) b_score += 1000;
+        
+        return a_score > b_score;
     });
     
     // Generate all Cop 1st turn combinations
