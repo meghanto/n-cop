@@ -779,7 +779,8 @@ pub fn robber_best_move_wasm(k: u8, n: usize, blue_edges_flat: &[u8], red_edges_
             let a = o_comps[i];
             let b = o_comps[j];
             if mu[a][b] > 0 {
-                let c_val = m_r(a, &mu) * m_t(b, &mu) + m_t(a, &mu) * m_r(b, &mu);
+                let mr_e = m_r(a, &mu) + m_r(b, &mu);
+                let mt_e = m_t(a, &mu) + m_t(b, &mu);
                 
                 let mut new_mu = mu.clone();
                 for d in 0..state.k as usize {
@@ -792,9 +793,16 @@ pub fn robber_best_move_wasm(k: u8, n: usize, blue_edges_flat: &[u8], red_edges_
                 }
                 new_mu[a][b] = 0; new_mu[b][a] = 0;
                 
-                let lambda = lambda_after_move(&new_mu);
-                let s = c_val - (n as i32) * lambda;
                 let tiebreak = sigma(a, &new_mu);
+                let mut s = -1_000_000_000;
+                
+                if mr_e > n as i32 && mt_e > n as i32 {
+                    s = 1_000_000_000;
+                } else {
+                    let c_val = m_r(a, &mu) * m_t(b, &mu) + m_t(a, &mu) * m_r(b, &mu);
+                    let lambda = lambda_after_move(&new_mu);
+                    s = c_val - (n as i32) * lambda;
+                }
                 
                 if s > best_score {
                     best_score = s;
