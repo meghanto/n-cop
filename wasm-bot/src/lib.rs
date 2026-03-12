@@ -492,11 +492,11 @@ pub fn cop_best_move_wasm(k: u8, n: usize, blue_edges_flat: &[u8], red_edges_fla
         
         // HIGHEST priority: the direct threat edges between components containing 0 and 1
         if (cu == root0 && cv == root1) || (cu == root1 && cv == root0) {
-            score += 1000000;
+            score += 500_000_000;
         } 
         // HIGH priority: incident to 0 or 1's component
         else if cu == root0 || cu == root1 || cv == root0 || cv == root1 {
-            score += 50000;
+            score += 50_000_000;
         }
         
         let mut mut_state = state;
