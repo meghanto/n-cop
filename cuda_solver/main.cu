@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <vector>
 #include <sys/time.h>
+#include <algorithm>
 
 #define K 9
 #define COPS 3
@@ -120,7 +121,9 @@ __device__ bool tt_probe(TTEntry* tt, uint64_t h0, uint64_t h1, int* score, int*
     return false;
 }
 
+// Global metrics
 __device__ unsigned long long nodes_evaluated = 0;
+__device__ unsigned long long tt_hits = 0;
 
 __device__ int device_alpha_beta(AdjMatrix blue, AdjMatrix red, int depth, int alpha, int beta, bool is_cop, int picks_left, TTEntry* tt) {
     atomicAdd(&nodes_evaluated, 1);
@@ -142,6 +145,7 @@ __device__ int device_alpha_beta(AdjMatrix blue, AdjMatrix red, int depth, int a
     
     int tt_score, tt_flag;
     if (tt_probe(tt, h0, h1, &tt_score, &tt_flag, depth)) {
+        atomicAdd(&tt_hits, 1);
         if (tt_flag == 0) return tt_score;
         if (tt_flag == 1 && tt_score > alpha) alpha = tt_score;
         if (tt_flag == 2 && tt_score < beta) beta = tt_score;
@@ -152,14 +156,27 @@ __device__ int device_alpha_beta(AdjMatrix blue, AdjMatrix red, int depth, int a
     uint8_t edges_v[120];
     int num_edges = 0;
     
+    // Sort edges manually to improve Alpha-Beta cutoffs (Massive speedup)
+    // Edges touching 0 and 1 are vastly more important
     for (int u = 0; u < K; u++) {
         uint16_t avail = mask & ~blue.rows[u] & ~red.rows[u];
         avail &= ~((1 << (u + 1)) - 1); 
         while (avail != 0) {
             int v = __ffs(avail) - 1;
             if (num_edges < 120 && v >= 0 && v < 16) {
-                edges_u[num_edges] = u;
-                edges_v[num_edges] = v;
+                // Heuristic: put important edges at the front
+                if (u <= 1 || v <= 1) {
+                    // Shift everything right
+                    for(int k = num_edges; k > 0; k--) {
+                        edges_u[k] = edges_u[k-1];
+                        edges_v[k] = edges_v[k-1];
+                    }
+                    edges_u[0] = u;
+                    edges_v[0] = v;
+                } else {
+                    edges_u[num_edges] = u;
+                    edges_v[num_edges] = v;
+                }
                 num_edges++;
             }
             avail &= avail - 1;
@@ -250,7 +267,7 @@ double get_time() {
 }
 
 int main() {
-    printf("Initializing GPU Parallel Alpha-Beta Solver for K%d (%d Cops)\n", K, COPS);
+    printf("Initializing Optimized GPU Parallel Alpha-Beta Solver for K%d (%d Cops)\n", K, COPS);
     
     AdjMatrix root_blue, root_red;
     init_matrix(&root_blue);
@@ -259,7 +276,16 @@ int main() {
     std::vector<Job> jobs;
     std::vector<Edge> edges = get_remaining_edges(root_blue, root_red);
     
-    // Generate all Cop 1st turn combinations (n=3)
+    // Sort edges so 0-1 threats are handled first even at the root!
+    std::sort(edges.begin(), edges.end(), [](const Edge& a, const Edge& b) {
+        bool a_important = (a.u <= 1 || a.v <= 1);
+        bool b_important = (b.u <= 1 || b.v <= 1);
+        if (a_important && !b_important) return true;
+        if (!a_important && b_important) return false;
+        return false;
+    });
+    
+    // Generate all Cop 1st turn combinations
     if (COPS == 3) {
         for(int i=0; i<edges.size(); i++) {
             for(int j=i+1; j<edges.size(); j++) {
@@ -276,29 +302,16 @@ int main() {
                 }
             }
         }
-    } else if (COPS == 2) {
-        for(int i=0; i<edges.size(); i++) {
-            for(int j=i+1; j<edges.size(); j++) {
-                Job job;
-                init_matrix(&job.blue);
-                init_matrix(&job.red);
-                add_edge(&job.blue, edges[i].u, edges[i].v);
-                add_edge(&job.blue, edges[j].u, edges[j].v);
-                job.is_cop = false; 
-                job.picks_left = 0;
-                jobs.push_back(job);
-            }
-        }
     } else {
-        printf("Please manually generate root combinations for COPS != 2 or 3\n");
+        printf("Set COPS=3 for this layout.\n");
         return 1;
     }
     
     int num_jobs = jobs.size();
-    printf("CPU generated %d parallel root jobs (all first-turn Cop combinations).\n", num_jobs);
+    printf("CPU generated %d parallel root jobs.\n", num_jobs);
 
     size_t tt_bytes = TT_ENTRIES * sizeof(TTEntry);
-    printf("Allocating %.2f GB for Lockless GPU Transposition Table...\n", tt_bytes / (1024.0*1024*1024));
+    printf("Allocating %.2f GB for GPU Transposition Table...\n", tt_bytes / (1024.0*1024*1024));
     
     TTEntry* d_tt;
     cudaMalloc(&d_tt, tt_bytes);
@@ -311,15 +324,15 @@ int main() {
     cudaMemcpy(d_jobs, jobs.data(), num_jobs * sizeof(Job), cudaMemcpyHostToDevice);
     
     int blocks = (num_jobs + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    cudaDeviceSetLimit(cudaLimitStackSize, 65536); // Crucial for recursive alpha-beta
+    cudaDeviceSetLimit(cudaLimitStackSize, 65536); 
     
-    // Iterative Deepening Loop
     for (int depth = 1; depth <= 12; depth++) {
         printf("\n[Depth %d] Launching GPU Alpha-Beta search...\n", depth);
-        if (depth == 1) cudaMemset(d_tt, 0, tt_bytes); // Only clear on first run
+        if (depth == 1) cudaMemset(d_tt, 0, tt_bytes); 
         
         unsigned long long zero = 0;
         cudaMemcpyToSymbol(nodes_evaluated, &zero, sizeof(unsigned long long));
+        cudaMemcpyToSymbol(tt_hits, &zero, sizeof(unsigned long long));
         
         double t1 = get_time();
         evaluate_jobs_kernel<<<blocks, THREADS_PER_BLOCK>>>(d_jobs, d_results, num_jobs, d_tt, depth);
@@ -335,8 +348,9 @@ int main() {
         std::vector<int> results(num_jobs);
         cudaMemcpy(results.data(), d_results, num_jobs * sizeof(int), cudaMemcpyDeviceToHost);
         
-        unsigned long long h_nodes = 0;
+        unsigned long long h_nodes = 0, h_hits = 0;
         cudaMemcpyFromSymbol(&h_nodes, nodes_evaluated, sizeof(unsigned long long), 0, cudaMemcpyDeviceToHost);
+        cudaMemcpyFromSymbol(&h_hits, tt_hits, sizeof(unsigned long long), 0, cudaMemcpyDeviceToHost);
         
         int cop_wins = 0, rob_wins = 0, draws = 0;
         for (int r : results) {
@@ -346,15 +360,13 @@ int main() {
         }
         
         printf("  -> Cop forced wins: %d | Robber forced wins: %d | Unknowns: %d\n", cop_wins, rob_wins, draws);
-        printf("  -> Time: %.3f seconds | Nodes evaluated: %llu | Throughput: %.2f M nodes/s\n", 
-            t2 - t1, h_nodes, (h_nodes / 1000000.0) / (t2 - t1));
+        printf("  -> Time: %.3f seconds | Nodes: %llu | TT Hits: %llu | Throughput: %.2f M nodes/s\n", 
+            t2 - t1, h_nodes, h_hits, (h_nodes / 1000000.0) / (t2 - t1));
             
-        // If the Cop wins ANY of the root jobs, the Cop wins the whole game!
         if (cop_wins > 0) {
             printf("\n*** COP WINS! Found a winning opening branch at depth %d ***\n", depth);
             break;
         }
-        // If the Robber wins ALL of the root jobs, the Robber wins the whole game!
         if (rob_wins == num_jobs) {
             printf("\n*** ROBBER WINS! Robber survives all Cop openings at depth %d ***\n", depth);
             break;
