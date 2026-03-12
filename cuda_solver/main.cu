@@ -275,8 +275,15 @@ int main() {
         cudaMemcpyToSymbol(nodes_evaluated, &zero, sizeof(unsigned long long));
         
         auto t1 = std::chrono::steady_clock::now();
-        evaluate_jobs_kernel<<<(n_jobs + 255)/256, 256>>>(d_j, d_r, n_jobs, d_tt, depth);
-        cudaDeviceSynchronize();
+        
+        // Batch Processing to prevent Cache Starvation
+        int batch_size = 64; // Small batches so early jobs populate TT for later jobs
+        for (int i = 0; i < n_jobs; i += batch_size) {
+            int current_batch = std::min(batch_size, n_jobs - i);
+            evaluate_jobs_kernel<<<(current_batch + 255)/256, 256>>>(d_j + i, d_r + i, current_batch, d_tt, depth);
+            cudaDeviceSynchronize();
+        }
+        
         auto t2 = std::chrono::steady_clock::now();
         
         double dt = std::chrono::duration<double>(t2 - t1).count();
