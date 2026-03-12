@@ -1,5 +1,4 @@
-#include <cstdio>
-#include <iostream>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <vector>
@@ -179,7 +178,7 @@ void generate_root_jobs(int u_s, int v_s, int p_l, AdjMatrix blue, std::vector<J
 }
 
 int main() {
-    std::printf("Initializing Absolute n-cop GPU Solver (K%d, %d Cops)\n", K, COPS);
+    printf("Initializing Absolute n-cop GPU Solver (K%d, %d Cops)\n", K, COPS);
     AdjMatrix rb; init_matrix(&rb);
     std::vector<Job> jobs;
     generate_root_jobs(0, 1, COPS, rb, jobs);
@@ -192,7 +191,7 @@ int main() {
     
     int n_jobs = jobs.size();
     size_t tt_b = TT_ENTRIES * sizeof(TTEntry);
-    std::printf("CPU jobs: %d | TT Size: %.2f GB\n", n_jobs, tt_b / (1024.0*1024*1024));
+    printf("CPU jobs: %d | TT Size: %.2f GB\n", n_jobs, tt_b / (1024.0*1024*1024));
     
     TTEntry* d_tt; cudaMalloc(&d_tt, tt_b);
     Job* d_j; int* d_r;
@@ -203,7 +202,7 @@ int main() {
     cudaDeviceSetLimit(cudaLimitStackSize, 65536);
     
     for (int depth = 1; depth <= 12; depth++) {
-        std::printf("\n[Depth %d] starting GPU search...\n", depth);
+        printf("\n[Depth %d] starting GPU search...\n", depth);
         if (depth == 1) cudaMemset(d_tt, 0, tt_b);
         
         unsigned long long zero = 0;
@@ -226,11 +225,11 @@ int main() {
             if (r == 1) c_w++; else if (r == -1) r_w++; else dr++;
         }
         
-        std::printf("  -> Cop force-wins: %d | Robber force-wins: %d | Unresolved: %d\n", c_w, r_w, dr);
-        std::printf("  -> Time: %.3f s | Nodes: %llu | Speed: %.2f M/s\n", dt, n_e, (n_e / 1000000.0) / dt);
+        printf("  -> Cop force-wins: %d | Robber force-wins: %d | Unresolved: %d\n", c_w, r_w, dr);
+        printf("  -> Time: %.3f s | Nodes: %llu | Speed: %.2f M/s\n", dt, n_e, (n_e / 1000000.0) / dt);
         
-        if (c_w > 0) { std::printf("\n*** PROOF COMPLETE: COP WINS ***\n"); break; }
-        if (r_w == n_jobs) { std::printf("\n*** PROOF COMPLETE: ROBBER WINS ***\n"); break; }
+        if (c_w > 0) { printf("\n*** PROOF COMPLETE: COP WINS ***\n"); break; }
+        if (r_w == n_jobs) { printf("\n*** PROOF COMPLETE: ROBBER WINS ***\n"); break; }
     }
     
     cudaFree(d_tt); cudaFree(d_j); cudaFree(d_r);
