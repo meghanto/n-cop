@@ -240,6 +240,8 @@ __device__ int device_alpha_beta(AdjMatrix blue, AdjMatrix red, int depth, int a
 
 struct Job { AdjMatrix blue; AdjMatrix red; bool is_cop; int picks_left; };
 
+struct Edge { int u, v; };
+
 __global__ void evaluate_jobs_kernel(Job* jobs, int* results, int num_jobs, TTEntry* tt, int max_depth) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_jobs) return;
