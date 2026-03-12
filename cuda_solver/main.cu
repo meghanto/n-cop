@@ -135,6 +135,10 @@ __device__ int device_alpha_beta(AdjMatrix blue, AdjMatrix red, int depth, int a
     uint8_t edges_u[120], edges_v[120]; int n_edges = 0;
     uint16_t seen_pairs_arr[16] = {0};
 
+    // To prevent the massive divergence that causes it to hang, we must score and sort edges
+    // identical to the Rust solver `sort_edges_by_score`!
+    int16_t edge_scores[120];
+
     for (int u=0; u<K; u++) {
         uint16_t av = mask & ~blue.rows[u] & ~red.rows[u] & ~((1<<(u+1))-1);
         while(av) {
@@ -146,13 +150,38 @@ __device__ int device_alpha_beta(AdjMatrix blue, AdjMatrix red, int depth, int a
                 int lo = cu < cv ? cu : cv;
                 int hi = cu > cv ? cu : cv;
                 
+                bool use_edge = false;
                 if (is_cop) {
                     if ((seen_pairs_arr[lo] & (1 << hi)) == 0) {
                         seen_pairs_arr[lo] |= (1 << hi);
-                        edges_u[n_edges]=u; edges_v[n_edges]=v; n_edges++;
+                        use_edge = true;
                     }
                 } else {
-                    edges_u[n_edges]=u; edges_v[n_edges]=v; n_edges++;
+                    use_edge = true;
+                }
+                
+                if (use_edge) {
+                    // Rust-style scoring
+                    int16_t terminal = (u <= 1 || v <= 1) ? 100 : 0;
+                    uint16_t comp_v_mask = 0;
+                    for (int i=0; i<K; i++) if (comp_map[i] == cv) comp_v_mask |= (1<<i);
+                    int16_t weight = 0;
+                    for (int i=0; i<K; i++) if (comp_map[i] == cu) weight += __popc(mask & ~blue.rows[i] & ~red.rows[i] & comp_v_mask);
+                    
+                    int16_t score = terminal - weight;
+                    
+                    // Insertion sort
+                    int k = n_edges;
+                    while (k > 0 && edge_scores[k-1] < score) {
+                        edges_u[k] = edges_u[k-1];
+                        edges_v[k] = edges_v[k-1];
+                        edge_scores[k] = edge_scores[k-1];
+                        k--;
+                    }
+                    edges_u[k] = u;
+                    edges_v[k] = v;
+                    edge_scores[k] = score;
+                    n_edges++;
                 }
             }
             av &= av-1;
@@ -215,10 +244,16 @@ void generate_root_jobs(int u_s, int v_s, int p_l, AdjMatrix blue, std::vector<J
 }
 
 int main() {
-    std::printf("Initializing Rust-Optimized n-cop GPU Solver (K%d, %d Cops)\n", K, COPS);
+    std::printf("Initializing Maximum-Pruning GPU Solver (K%d, %d Cops)\n", K, COPS);
     AdjMatrix rb; init_matrix(&rb);
     std::vector<Job> jobs;
     generate_root_jobs(0, 1, COPS, rb, jobs);
+    
+    std::sort(jobs.begin(), jobs.end(), [](const Job& a, const Job& b) {
+        int a_s = (has_edge(&a.blue, 0, 1) ? 1000 : 0);
+        int b_s = (has_edge(&b.blue, 0, 1) ? 1000 : 0);
+        return a_s > b_s;
+    });
     
     int n_jobs = jobs.size();
     size_t tt_b = TT_ENTRIES * sizeof(TTEntry);
@@ -252,9 +287,7 @@ int main() {
         cudaMemcpyFromSymbol(&n_e, nodes_evaluated, sizeof(unsigned long long), 0, cudaMemcpyDeviceToHost);
         
         int c_w = 0, r_w = 0, dr = 0;
-        for (int r : res) {
-            if (r == 1) c_w++; else if (r == -1) r_w++; else dr++;
-        }
+        for (int r : res) { if (r == 1) c_w++; else if (r == -1) r_w++; else dr++; }
         
         std::printf("  -> Cop force-wins: %d | Robber force-wins: %d | Unresolved: %d\n", c_w, r_w, dr);
         std::printf("  -> Time: %.3f s | Nodes: %llu | Speed: %.2f M/s\n", dt, n_e, (n_e / 1000000.0) / dt);
