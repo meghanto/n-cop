@@ -156,7 +156,6 @@ __device__ int device_alpha_beta(AdjMatrix blue, AdjMatrix red, int depth, int a
     return best;
 }
 
-struct Job { AdjMatrix blue; bool is_cop; int picks_left; };
 __global__ void evaluate_jobs_kernel(Job* jobs, int* results, int num_jobs, TTEntry* tt, int max_depth) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_jobs) return;
