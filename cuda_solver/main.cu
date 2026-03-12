@@ -22,27 +22,29 @@ __device__ __host__ void init_matrix(AdjMatrix* m) { for (int i=0; i<16; i++) m-
 __device__ __host__ void add_edge(AdjMatrix* m, int u, int v) { if (u>=0 && u<16 && v>=0 && v<16) { m->rows[u]|=(1<<v); m->rows[v]|=(1<<u); } }
 __device__ __host__ bool has_edge(const AdjMatrix* m, int u, int v) { return (m->rows[u] & (1<<v)) != 0; }
 
-__device__ uint16_t get_component(const AdjMatrix* red, int start, int k) {
-    uint16_t visited = 0, frontier = (1 << start);
-    while (frontier) {
-        visited |= frontier; uint16_t next_f = 0;
-        while (frontier) {
-            int b = __ffs(frontier)-1;
-            next_f |= red->rows[b];
-            frontier &= ~(1<<b);
+// Fast Union-Find based component mapping for the GPU
+__device__ void get_comp_map(const AdjMatrix* red, uint8_t* comp_map) {
+    for (int i=0; i<16; i++) comp_map[i] = i;
+    for (int i=0; i<K; i++) {
+        uint16_t r = red->rows[i];
+        while (r) {
+            int b = __ffs(r)-1;
+            int root_i = i; while(comp_map[root_i] != root_i) root_i = comp_map[root_i];
+            int root_b = b; while(comp_map[root_b] != root_b) root_b = comp_map[root_b];
+            if (root_i != root_b) comp_map[root_i] = root_b;
+            r &= r-1;
         }
-        frontier = next_f & ~visited;
     }
-    return visited;
+    for (int i=0; i<K; i++) {
+        int root = i; while(comp_map[root] != root) root = comp_map[root];
+        comp_map[i] = root;
+    }
 }
 
-__device__ __host__ uint64_t mix(uint64_t h) {
-    h ^= h >> 33;
-    h *= 0xff51afd7ed558ccdULL;
-    h ^= h >> 33;
-    h *= 0xc4ceb9fe1a85ec53ULL;
-    h ^= h >> 33;
-    return h;
+__device__ __host__ uint64_t splitmix64(uint64_t z) {
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
 }
 
 __device__ void tt_store(TTEntry* tt, uint64_t h0, uint64_t h1, int score, int flag, int depth) {
@@ -70,39 +72,37 @@ __device__ unsigned long long nodes_evaluated = 0;
 __device__ int device_alpha_beta(AdjMatrix blue, AdjMatrix red, int depth, int alpha, int beta, bool is_cop, int picks_left, TTEntry* tt) {
     atomicAdd(&nodes_evaluated, 1);
     
-    // 1. Component Mapping & Win Check
-    uint8_t comp_map[16]; uint16_t visited = 0;
-    for (int i=0; i<K; i++) {
-        if (!(visited & (1<<i))) {
-            uint16_t m = get_component(&red, i, K);
-            visited |= m;
-            while(m) { int b=__ffs(m)-1; comp_map[b]=i; m &= m-1; }
-        }
-    }
-    if (comp_map[0] == comp_map[1]) return -1;
+    // 1. Component Mapping & Connectivity Win Check
+    uint8_t comp_map[16]; get_comp_map(&red, comp_map);
+    if (comp_map[0] == comp_map[1]) return -1; // Robber Win
     
-    // 2. Cop Win Check (Pruning)
+    // 2. Cop Win Check (Pruning) - Is node 0 and 1 still reachable?
     uint16_t mask = (1 << K) - 1;
-    AdjMatrix av_g; init_matrix(&av_g);
-    for (int i=0; i<K; i++) av_g.rows[i] = mask & ~blue.rows[i] & ~(1 << i);
     {
         uint16_t v = 1, f = 1; bool ok = false;
         while(f) {
             if(v&2){ok=true;break;}
             uint16_t nf=0, tf=f;
-            while(tf){int b=__ffs(tf)-1; nf|=av_g.rows[b]; tf&=~(1<<b);}
+            while(tf){
+                int b=__ffs(tf)-1; 
+                nf |= (mask & ~blue.rows[b] & ~(1 << b)); 
+                tf&=~(1<<b);
+            }
             f=nf&~v; v|=nf;
         }
-        if (!ok) return 1;
+        if (!ok) return 1; // Cop Win
     }
     if (depth <= 0) return 0;
 
-    // 3. Transposition Table Probe
+    // 3. Transposition Table Probe (Hashed Contracted State)
     uint64_t h = 0x123456789ABCDEF0ULL;
-    for(int i=0; i<K; i++) { h ^= mix(blue.rows[i] + (h<<7)); h ^= mix(comp_map[i] + (h>>3)); }
+    for(int i=0; i<K; i++) {
+        h ^= splitmix64(blue.rows[i] + (h << 7));
+        h ^= splitmix64(comp_map[i] + (h >> 3));
+    }
     if (is_cop) h ^= 0x5555555555555555ULL;
-    h ^= mix(picks_left + 0xAAAAAAAABBBBBBBBULL);
-    uint64_t h0 = mix(h), h1 = mix(h ^ 0xDEADBEEFCAFEBABEULL);
+    h ^= splitmix64(picks_left + 0xAAAAAAAABBBBBBBBULL);
+    uint64_t h0 = splitmix64(h), h1 = splitmix64(h ^ 0xDEADBEEFCAFEBABEULL);
 
     int tt_s, tt_f;
     if (tt_probe(tt, h0, h1, &tt_s, &tt_f, depth)) {
@@ -118,11 +118,12 @@ __device__ int device_alpha_beta(AdjMatrix blue, AdjMatrix red, int depth, int a
         uint16_t av = mask & ~blue.rows[u] & ~red.rows[u] & ~((1<<(u+1))-1);
         while(av) {
             int v = __ffs(av)-1;
+            // Pruning: Don't pick edges that connect nodes already in the same robber component
             if (comp_map[u] != comp_map[v]) { edges_u[n_edges]=u; edges_v[n_edges]=v; n_edges++; }
             av &= av-1;
         }
     }
-    if (n_edges == 0) return 1;
+    if (n_edges == 0) return 1; // No more useful moves for Robber, Cop Wins
 
     // 5. Alpha-Beta Recursion
     int orig_a = alpha, orig_b = beta, best;
@@ -132,7 +133,7 @@ __device__ int device_alpha_beta(AdjMatrix blue, AdjMatrix red, int depth, int a
             AdjMatrix nb = blue; add_edge(&nb, edges_u[i], edges_v[i]);
             int s = (picks_left > 1) 
                 ? device_alpha_beta(nb, red, depth, alpha, beta, true, picks_left-1, tt) 
-                : device_alpha_beta(nb, red, depth, alpha, beta, false, 0, tt);
+                : device_alpha_beta(nb, red, depth - 1, alpha, beta, false, 0, tt);
             if (s > best) best = s;
             if (best > alpha) alpha = best;
             if (alpha >= beta) break;
@@ -155,6 +156,7 @@ __device__ int device_alpha_beta(AdjMatrix blue, AdjMatrix red, int depth, int a
     return best;
 }
 
+struct Job { AdjMatrix blue; bool is_cop; int picks_left; };
 __global__ void evaluate_jobs_kernel(Job* jobs, int* results, int num_jobs, TTEntry* tt, int max_depth) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_jobs) return;
@@ -169,29 +171,21 @@ void generate_root_jobs(int u_s, int v_s, int p_l, AdjMatrix blue, std::vector<J
     }
     for (int u = u_s; u < K; u++) {
         for (int v = (u == u_s ? v_s : u + 1); v < K; v++) {
-            if (!has_edge(&blue, u, v)) {
-                AdjMatrix next = blue; add_edge(&next, u, v);
-                generate_root_jobs(u, v + 1, p_l - 1, next, jobs);
-            }
+            AdjMatrix next = blue; add_edge(&next, u, v);
+            generate_root_jobs(u, v + 1, p_l - 1, next, jobs);
         }
     }
 }
 
 int main() {
-    printf("Initializing Absolute n-cop GPU Solver (K%d, %d Cops)\n", K, COPS);
+    printf("Initializing absolute-optimized n-cop GPU Solver (K%d, %d Cops)\n", K, COPS);
     AdjMatrix rb; init_matrix(&rb);
     std::vector<Job> jobs;
     generate_root_jobs(0, 1, COPS, rb, jobs);
     
-    std::sort(jobs.begin(), jobs.end(), [](const Job& a, const Job& b) {
-        int a_s = (has_edge(&a.blue, 0, 1) ? 1000 : 0);
-        int b_s = (has_edge(&b.blue, 0, 1) ? 1000 : 0);
-        return a_s > b_s;
-    });
-    
     int n_jobs = jobs.size();
     size_t tt_b = TT_ENTRIES * sizeof(TTEntry);
-    printf("CPU jobs: %d | TT Size: %.2f GB\n", n_jobs, tt_b / (1024.0*1024*1024));
+    printf("CPU generated %d opening branches. TT Size: %.2f GB\n", n_jobs, tt_b / (1024.0*1024*1024));
     
     TTEntry* d_tt; cudaMalloc(&d_tt, tt_b);
     Job* d_j; int* d_r;
@@ -204,7 +198,6 @@ int main() {
     for (int depth = 1; depth <= 12; depth++) {
         printf("\n[Depth %d] starting GPU search...\n", depth);
         if (depth == 1) cudaMemset(d_tt, 0, tt_b);
-        
         unsigned long long zero = 0;
         cudaMemcpyToSymbol(nodes_evaluated, &zero, sizeof(unsigned long long));
         
@@ -216,15 +209,11 @@ int main() {
         double dt = std::chrono::duration<double>(t2 - t1).count();
         std::vector<int> res(n_jobs);
         cudaMemcpy(res.data(), d_r, n_jobs * sizeof(int), cudaMemcpyDeviceToHost);
-        
         unsigned long long n_e = 0;
         cudaMemcpyFromSymbol(&n_e, nodes_evaluated, sizeof(unsigned long long), 0, cudaMemcpyDeviceToHost);
         
         int c_w = 0, r_w = 0, dr = 0;
-        for (int r : res) {
-            if (r == 1) c_w++; else if (r == -1) r_w++; else dr++;
-        }
-        
+        for (int r : res) { if (r == 1) c_w++; else if (r == -1) r_w++; else dr++; }
         printf("  -> Cop force-wins: %d | Robber force-wins: %d | Unresolved: %d\n", c_w, r_w, dr);
         printf("  -> Time: %.3f s | Nodes: %llu | Speed: %.2f M/s\n", dt, n_e, (n_e / 1000000.0) / dt);
         
