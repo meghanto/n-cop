@@ -228,17 +228,18 @@ impl Searcher {
         false
     }
 
-    fn hash_state(state: &GameState, cop_turn: bool) -> u64 {
+    fn hash_state(state: &GameState, cop_turn: bool, picks_left: usize) -> u64 {
         let mut h = 0u64;
         for i in 0..state.k as usize {
             h ^= (state.blue.rows[i] as u64) << (i * 2);
             h ^= (state.red.rows[i] as u64) << (i * 2 + 1);
         }
         if cop_turn { h ^= 0x123456789ABCDEF0; }
+        h ^= (picks_left as u64) << 50;
         h
     }
 
-    fn minimax(&mut self, state: &GameState, depth: i32, mut alpha: i32, mut beta: i32, is_cop: bool, picks_left: usize, last_edge: Option<(usize, usize)>) -> i32 {
+    fn minimax(&mut self, state: &GameState, depth: i32, mut alpha: i32, mut beta: i32, is_cop: bool, picks_left: usize) -> i32 {
         self.nodes += 1;
         if self.check_time() { return 0; }
 
@@ -347,26 +348,19 @@ impl Searcher {
             }
         }
         
-        let hash = Self::hash_state(state, is_cop);
+        let hash = Self::hash_state(state, is_cop, picks_left);
         let orig_alpha = alpha;
         
-        if whole_turn {
-            if let Some(entry) = self.tt.get(&hash) {
-                if entry.depth >= depth {
-                    if entry.flag == 0 { return entry.val; }
-                    if entry.flag == 1 { alpha = alpha.max(entry.val); }
-                    if entry.flag == 2 { beta = beta.min(entry.val); }
-                    if alpha >= beta { return entry.val; }
-                }
+        if let Some(entry) = self.tt.get(&hash) {
+            if entry.depth >= depth {
+                if entry.flag == 0 { return entry.val; }
+                if entry.flag == 1 { alpha = alpha.max(entry.val); }
+                if entry.flag == 2 { beta = beta.min(entry.val); }
+                if alpha >= beta { return entry.val; }
             }
         }
 
         let mut edges = state.remaining_edges();
-        if is_cop && picks_left < state.n {
-            if let Some(last) = last_edge {
-                edges.retain(|&e| e > last);
-            }
-        }
         if edges.is_empty() { return state.eval_cop(); }
 
         // move ordering
@@ -402,9 +396,9 @@ impl Searcher {
                 next.blue.add_edge(u, v);
                 
                 let score = if picks_left > 1 {
-                    self.minimax(&next, depth, alpha, beta, true, picks_left - 1, Some((u, v)))
+                    self.minimax(&next, depth, alpha, beta, true, picks_left - 1)
                 } else {
-                    self.minimax(&next, depth - 1, alpha, beta, false, 0, None)
+                    self.minimax(&next, depth - 1, alpha, beta, false, 0)
                 };
                 
                 if self.timeout { return 0; }
@@ -419,7 +413,7 @@ impl Searcher {
                 let mut next = *state;
                 next.red.add_edge(u, v);
                 
-                let score = self.minimax(&next, depth - 1, alpha, beta, true, state.n, None);
+                let score = self.minimax(&next, depth - 1, alpha, beta, true, state.n);
                 
                 if self.timeout { return 0; }
                 best = best.min(score);
@@ -429,7 +423,7 @@ impl Searcher {
             val = best;
         }
 
-        if whole_turn && !self.timeout {
+        if !self.timeout {
             let flag = if val <= orig_alpha { 2 } else if val >= beta { 1 } else { 0 };
             self.tt.insert(hash, TTEntry { depth, flag, val });
         }
@@ -579,7 +573,7 @@ pub fn cop_best_move_wasm(k: u8, n: usize, blue_edges_flat: &[u8], red_edges_fla
             let score = if next.did_cop_win() {
                 COP_WIN + 1000
             } else {
-                searcher.minimax(&next, depth - 1, -INF, INF, false, 0, None)
+                searcher.minimax(&next, depth - 1, -INF, INF, false, 0)
             };
             
             if score > best_score {
