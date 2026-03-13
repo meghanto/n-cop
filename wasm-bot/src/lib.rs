@@ -238,7 +238,7 @@ impl Searcher {
         h
     }
 
-    fn minimax(&mut self, state: &GameState, depth: i32, mut alpha: i32, mut beta: i32, is_cop: bool, picks_left: usize) -> i32 {
+    fn minimax(&mut self, state: &GameState, depth: i32, mut alpha: i32, mut beta: i32, is_cop: bool, picks_left: usize, last_edge: Option<(usize, usize)>) -> i32 {
         self.nodes += 1;
         if self.check_time() { return 0; }
 
@@ -362,15 +362,36 @@ impl Searcher {
         }
 
         let mut edges = state.remaining_edges();
+        if is_cop && picks_left < state.n {
+            if let Some(last) = last_edge {
+                edges.retain(|&e| e > last);
+            }
+        }
         if edges.is_empty() { return state.eval_cop(); }
 
-        // basic move ordering for robber turns
+        // move ordering
         if !is_cop {
             edges.sort_by_key(|&(u, v)| {
                 let mut next = *state;
                 next.red.add_edge(u, v);
                 if next.did_robber_win() { -100000 } else { 0 }
             });
+        } else if picks_left == state.n {
+            edges.sort_by_key(|&(u, v)| {
+                let mut score = 0;
+                let cu = comp_map[u];
+                let cv = comp_map[v];
+                if (cu == root0 && cv == root1) || (cu == root1 && cv == root0) {
+                    score += 500_000_000;
+                } else if cu == root0 || cu == root1 || cv == root0 || cv == root1 {
+                    score += 50_000_000;
+                }
+                let mut mut_state = *state;
+                mut_state.blue.add_edge(u, v);
+                score += mut_state.eval_cop();
+                score
+            });
+            edges.reverse();
         }
 
         let val;
@@ -381,9 +402,9 @@ impl Searcher {
                 next.blue.add_edge(u, v);
                 
                 let score = if picks_left > 1 {
-                    self.minimax(&next, depth, alpha, beta, true, picks_left - 1)
+                    self.minimax(&next, depth, alpha, beta, true, picks_left - 1, Some((u, v)))
                 } else {
-                    self.minimax(&next, depth - 1, alpha, beta, false, 0)
+                    self.minimax(&next, depth - 1, alpha, beta, false, 0, None)
                 };
                 
                 if self.timeout { return 0; }
@@ -398,7 +419,7 @@ impl Searcher {
                 let mut next = *state;
                 next.red.add_edge(u, v);
                 
-                let score = self.minimax(&next, depth - 1, alpha, beta, true, state.n);
+                let score = self.minimax(&next, depth - 1, alpha, beta, true, state.n, None);
                 
                 if self.timeout { return 0; }
                 best = best.min(score);
@@ -558,7 +579,7 @@ pub fn cop_best_move_wasm(k: u8, n: usize, blue_edges_flat: &[u8], red_edges_fla
             let score = if next.did_cop_win() {
                 COP_WIN + 1000
             } else {
-                searcher.minimax(&next, depth - 1, -INF, INF, false, 0)
+                searcher.minimax(&next, depth - 1, -INF, INF, false, 0, None)
             };
             
             if score > best_score {
