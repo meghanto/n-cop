@@ -186,6 +186,59 @@ impl GameState {
         
         -flow * 1000
     }
+    fn get_cop_subsets(&self) -> Vec<Vec<(usize, usize)>> {
+        let mut comp_map = [0; 16];
+        let mut visited = 0;
+        for i in 0..self.k as usize {
+            if (visited & (1 << i)) == 0 {
+                let comp = self.red.get_component(i);
+                visited |= comp;
+                let mut f = comp;
+                while f != 0 {
+                    let b = f.trailing_zeros() as usize;
+                    comp_map[b] = i;
+                    f &= f - 1;
+                }
+            }
+        }
+        let root0 = comp_map[0];
+        let root1 = comp_map[1];
+
+        let mut edges = self.remaining_edges();
+        if edges.is_empty() { return Vec::new(); }
+
+        edges.sort_by_key(|&(u, v)| {
+            let mut score = 0;
+            let cu = comp_map[u];
+            let cv = comp_map[v];
+            if (cu == root0 && cv == root1) || (cu == root1 && cv == root0) {
+                score += 500_000_000;
+            } else if cu == root0 || cu == root1 || cv == root0 || cv == root1 {
+                score += 50_000_000;
+            }
+            let mut mut_state = *self;
+            mut_state.blue.add_edge(u, v);
+            score += mut_state.eval_cop();
+            score
+        });
+        edges.reverse();
+
+        let pool_size = if self.n == 1 { 50 } else if self.n == 2 { 32 } else if self.n == 3 { 20 } else if self.n <= 6 { 16 } else { self.n + 4 };
+        let mut top_candidates = Vec::new();
+        for e in edges.iter().take(pool_size) {
+            top_candidates.push(*e);
+        }
+        for &(u, v) in &edges {
+            let cu = comp_map[u];
+            let cv = comp_map[v];
+            if (cu == root0 && cv == root1) || (cu == root1 && cv == root0) {
+                if !top_candidates.contains(&(u, v)) {
+                    top_candidates.push((u, v));
+                }
+            }
+        }
+        generate_subsets(&top_candidates, self.n)
+    }
 }
 
 fn js_now() -> f64 {
@@ -360,46 +413,19 @@ impl Searcher {
             }
         }
 
-        let mut edges = state.remaining_edges();
-        if edges.is_empty() { return state.eval_cop(); }
-
-        // move ordering
-        if !is_cop {
-            edges.sort_by_key(|&(u, v)| {
-                let mut next = *state;
-                next.red.add_edge(u, v);
-                if next.did_robber_win() { -100000 } else { 0 }
-            });
-        } else if picks_left == state.n {
-            edges.sort_by_key(|&(u, v)| {
-                let mut score = 0;
-                let cu = comp_map[u];
-                let cv = comp_map[v];
-                if (cu == root0 && cv == root1) || (cu == root1 && cv == root0) {
-                    score += 500_000_000;
-                } else if cu == root0 || cu == root1 || cv == root0 || cv == root1 {
-                    score += 50_000_000;
-                }
-                let mut mut_state = *state;
-                mut_state.blue.add_edge(u, v);
-                score += mut_state.eval_cop();
-                score
-            });
-            edges.reverse();
-        }
-
         let val;
         if is_cop {
             let mut best = -INF;
-            for &(u, v) in &edges {
+            let subsets = state.get_cop_subsets();
+            if subsets.is_empty() { return state.eval_cop(); }
+            
+            for subset in &subsets {
                 let mut next = *state;
-                next.blue.add_edge(u, v);
+                for &(u, v) in subset {
+                    next.blue.add_edge(u, v);
+                }
                 
-                let score = if picks_left > 1 {
-                    self.minimax(&next, depth, alpha, beta, true, picks_left - 1)
-                } else {
-                    self.minimax(&next, depth - 1, alpha, beta, false, 0)
-                };
+                let score = self.minimax(&next, depth - 1, alpha, beta, false, 0);
                 
                 if self.timeout { return 0; }
                 best = best.max(score);
@@ -408,6 +434,15 @@ impl Searcher {
             }
             val = best;
         } else {
+            let mut edges = state.remaining_edges();
+            if edges.is_empty() { return state.eval_cop(); }
+            
+            edges.sort_by_key(|&(u, v)| {
+                let mut next = *state;
+                next.red.add_edge(u, v);
+                if next.did_robber_win() { -100000 } else { 0 }
+            });
+            
             let mut best = INF;
             for &(u, v) in &edges {
                 let mut next = *state;
@@ -476,82 +511,10 @@ pub fn cop_best_move_wasm(k: u8, n: usize, blue_edges_flat: &[u8], red_edges_fla
         state.red.add_edge(red_edges_flat[i] as usize, red_edges_flat[i+1] as usize);
     }
 
-    let mut comp_map = [0; 16];
-    let mut visited = 0;
-    for i in 0..state.k as usize {
-        if (visited & (1 << i)) == 0 {
-            let comp = state.red.get_component(i);
-            visited |= comp;
-            let mut f = comp;
-            while f != 0 {
-                let b = f.trailing_zeros() as usize;
-                comp_map[b] = i;
-                f &= f - 1;
-            }
-        }
-    }
-    
-    let root0 = comp_map[0];
-    let root1 = comp_map[1];
-
-    let mut edges = state.remaining_edges();
-    if edges.is_empty() {
+    let subsets = state.get_cop_subsets();
+    if subsets.is_empty() {
         return js_sys::Int32Array::new_with_length(0);
     }
-
-    // Heuristic sort: evaluate cop flow, but hardcode priority for 0-1 edges to prevent truncation blindspots!
-    edges.sort_by_key(|&(u, v)| {
-        let mut score = 0;
-        let cu = comp_map[u];
-        let cv = comp_map[v];
-        
-        // HIGHEST priority: the direct threat edges between components containing 0 and 1
-        if (cu == root0 && cv == root1) || (cu == root1 && cv == root0) {
-            score += 500_000_000;
-        } 
-        // HIGH priority: incident to 0 or 1's component
-        else if cu == root0 || cu == root1 || cv == root0 || cv == root1 {
-            score += 50_000_000;
-        }
-        
-        let mut mut_state = state;
-        mut_state.blue.add_edge(u, v);
-        score += mut_state.eval_cop(); // typically around -11000
-        
-        score
-    });
-    edges.reverse();
-
-    // Dynamically size the candidate pool to avoid exploding subsets
-    let pool_size = if n == 1 {
-        50
-    } else if n == 2 {
-        32
-    } else if n == 3 {
-        20
-    } else if n <= 6 {
-        16
-    } else {
-        n + 4
-    };
-
-    let mut top_candidates = Vec::new();
-    for e in edges.iter().take(pool_size) {
-        top_candidates.push(*e);
-    }
-    
-    // Always guarantee any direct threat edges are in the pool!
-    for &(u, v) in &edges {
-        let cu = comp_map[u];
-        let cv = comp_map[v];
-        if (cu == root0 && cv == root1) || (cu == root1 && cv == root0) {
-            if !top_candidates.contains(&(u, v)) {
-                top_candidates.push((u, v));
-            }
-        }
-    }
-
-    let subsets = generate_subsets(&top_candidates, n);
     
     let mut searcher = Searcher::new(time_limit_ms);
     let mut best_move = Vec::new();
