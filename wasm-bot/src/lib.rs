@@ -239,6 +239,227 @@ impl GameState {
         }
         generate_subsets(&top_candidates, self.n)
     }
+
+    fn get_robber_move(&self) -> Option<(usize, usize)> {
+        let mut comp_map = [0; 16];
+        let mut visited = 0;
+        for i in 0..self.k as usize {
+            if (visited & (1 << i)) == 0 {
+                let comp = self.red.get_component(i);
+                visited |= comp;
+                let mut f = comp;
+                while f != 0 {
+                    let b = f.trailing_zeros() as usize;
+                    comp_map[b] = i;
+                    f &= f - 1;
+                }
+            }
+        }
+        
+        let root0 = comp_map[0];
+        let root1 = comp_map[1];
+        
+        let mut mu = [[0i32; 16]; 16];
+        let mask = (1 << self.k) - 1;
+        for u in 0..self.k as usize {
+            let cu = comp_map[u];
+            let mut avail = mask & !self.blue.rows[u] & !self.red.rows[u];
+            avail &= !((1 << (u + 1)) - 1);
+            while avail != 0 {
+                let v = avail.trailing_zeros() as usize;
+                let cv = comp_map[v];
+                if cu != cv {
+                    mu[cu][cv] += 1;
+                    mu[cv][cu] += 1;
+                }
+                avail &= avail - 1;
+            }
+        }
+        
+        let get_any_edge = |a: usize, b: usize| -> Option<(usize, usize)> {
+            for u in 0..self.k as usize {
+                if comp_map[u] == a || comp_map[u] == b {
+                    let mut avail = mask & !self.blue.rows[u] & !self.red.rows[u];
+                    while avail != 0 {
+                        let v = avail.trailing_zeros() as usize;
+                        if (comp_map[u] == a && comp_map[v] == b) || (comp_map[u] == b && comp_map[v] == a) {
+                            return Some((u, v));
+                        }
+                        avail &= avail - 1;
+                    }
+                }
+            }
+            None
+        };
+
+        let m_r = |c: usize, my_mu: &[[i32; 16]; 16]| -> i32 { my_mu[root0][c] };
+        let m_t = |c: usize, my_mu: &[[i32; 16]; 16]| -> i32 { my_mu[root1][c] };
+        
+        let gamma_t = |c: usize, my_mu: &[[i32; 16]; 16]| -> i32 {
+            let mut sum = 0;
+            for d in 0..self.k as usize {
+                if comp_map[d] == d && d != root0 && d != root1 && d != c {
+                    sum += my_mu[c][d] * m_r(d, my_mu);
+                }
+            }
+            sum
+        };
+        
+        let gamma_r = |c: usize, my_mu: &[[i32; 16]; 16]| -> i32 {
+            let mut sum = 0;
+            for d in 0..self.k as usize {
+                if comp_map[d] == d && d != root0 && d != root1 && d != c {
+                    sum += my_mu[c][d] * m_t(d, my_mu);
+                }
+            }
+            sum
+        };
+        
+        let sigma = |c: usize, my_mu: &[[i32; 16]; 16]| -> i32 {
+            let mr = m_r(c, my_mu);
+            let mt = m_t(c, my_mu);
+            let c3 = std::cmp::max(0, mr - self.n as i32) + std::cmp::max(0, mt - self.n as i32);
+            mr.min(mt).min(c3)
+        };
+        
+        let lambda_after_move = |new_mu: &[[i32; 16]; 16]| -> i32 {
+            let mut max_val = 0;
+            for x in 0..self.k as usize {
+                if comp_map[x] == x && x != root0 && x != root1 {
+                    max_val = max_val.max(m_r(x, new_mu).max(m_t(x, new_mu)));
+                }
+            }
+            max_val
+        };
+
+        let mut o_comps = Vec::new();
+        for i in 0..self.k as usize {
+            if comp_map[i] == i && i != root0 && i != root1 {
+                o_comps.push(i);
+            }
+        }
+        
+        if mu[root0][root1] > 0 {
+            if let Some(e) = get_any_edge(root0, root1) {
+                return Some(e);
+            }
+        }
+        
+        let mut best_move = None;
+        let mut best_score = -1_000_000_000;
+        let mut best_tiebreak = -1_000_000_000;
+        
+        for &c in &o_comps {
+            if m_t(c, &mu) > 0 {
+                let mut s = -1_000_000_000;
+                if m_r(c, &mu) > self.n as i32 {
+                    s = 1_000_000_000;
+                } else {
+                    let mut new_mu = mu.clone();
+                    for d in 0..self.k as usize {
+                        if d != c && d != root1 {
+                            new_mu[root1][d] += new_mu[c][d];
+                            new_mu[d][root1] += new_mu[c][d];
+                            new_mu[c][d] = 0;
+                            new_mu[d][c] = 0;
+                        }
+                    }
+                    new_mu[c][root1] = 0; new_mu[root1][c] = 0;
+                    
+                    let lambda = lambda_after_move(&new_mu);
+                    s = gamma_t(c, &mu) - m_r(c, &mu) * m_t(c, &mu) - (self.n as i32 - m_r(c, &mu)) * lambda;
+                }
+                if s > best_score {
+                    best_score = s;
+                    best_move = Some(("absorb_T", c, c));
+                    best_tiebreak = -1_000_000_000;
+                }
+            }
+            
+            if m_r(c, &mu) > 0 {
+                let mut s = -1_000_000_000;
+                if m_t(c, &mu) > self.n as i32 {
+                    s = 1_000_000_000;
+                } else {
+                    let mut new_mu = mu.clone();
+                    for d in 0..self.k as usize {
+                        if d != c && d != root0 {
+                            new_mu[root0][d] += new_mu[c][d];
+                            new_mu[d][root0] += new_mu[c][d];
+                            new_mu[c][d] = 0;
+                            new_mu[d][c] = 0;
+                        }
+                    }
+                    new_mu[c][root0] = 0; new_mu[root0][c] = 0;
+                    
+                    let lambda = lambda_after_move(&new_mu);
+                    s = gamma_r(c, &mu) - m_r(c, &mu) * m_t(c, &mu) - (self.n as i32 - m_t(c, &mu)) * lambda;
+                }
+                if s > best_score {
+                    best_score = s;
+                    best_move = Some(("absorb_R", c, c));
+                    best_tiebreak = -1_000_000_000;
+                }
+            }
+        }
+        
+        for i in 0..o_comps.len() {
+            for j in i+1..o_comps.len() {
+                let a = o_comps[i];
+                let b = o_comps[j];
+                if mu[a][b] > 0 {
+                    let mr_e = m_r(a, &mu) + m_r(b, &mu);
+                    let mt_e = m_t(a, &mu) + m_t(b, &mu);
+                    
+                    let mut new_mu = mu.clone();
+                    for d in 0..self.k as usize {
+                        if d != a && d != b {
+                            new_mu[a][d] += new_mu[b][d];
+                            new_mu[d][a] += new_mu[b][d];
+                            new_mu[b][d] = 0;
+                            new_mu[d][b] = 0;
+                        }
+                    }
+                    new_mu[a][b] = 0; new_mu[b][a] = 0;
+                    
+                    let tiebreak = sigma(a, &new_mu);
+                    let mut s = -1_000_000_000;
+                    
+                    if mr_e > self.n as i32 && mt_e > self.n as i32 {
+                        s = 1_000_000_000;
+                    } else {
+                        let c_val = m_r(a, &mu) * m_t(b, &mu) + m_t(a, &mu) * m_r(b, &mu);
+                        let lambda = lambda_after_move(&new_mu);
+                        s = c_val - (self.n as i32) * lambda;
+                    }
+                    
+                    if s > best_score {
+                        best_score = s;
+                        best_tiebreak = tiebreak;
+                        best_move = Some(("merge", a, b));
+                    } else if s == best_score && tiebreak > best_tiebreak {
+                        best_tiebreak = tiebreak;
+                        best_move = Some(("merge", a, b));
+                    }
+                }
+            }
+        }
+        
+        if let Some((kind, a, b)) = best_move {
+            let edge = match kind {
+                "absorb_T" => get_any_edge(a, root1),
+                "absorb_R" => get_any_edge(a, root0),
+                "merge" => get_any_edge(a, b),
+                _ => None
+            };
+            if edge.is_some() { return edge; }
+        }
+        
+        let edges = self.remaining_edges();
+        if !edges.is_empty() { return Some(edges[0]); }
+        None
+    }
+
 }
 
 fn js_now() -> f64 {
@@ -434,28 +655,14 @@ impl Searcher {
             }
             val = best;
         } else {
-            let mut edges = state.remaining_edges();
-            if edges.is_empty() { return state.eval_cop(); }
-            
-            edges.sort_by_key(|&(u, v)| {
+            // Predict the exact single move the Robber will make using its strategy
+            if let Some((u, v)) = state.get_robber_move() {
                 let mut next = *state;
                 next.red.add_edge(u, v);
-                if next.did_robber_win() { -100000 } else { 0 }
-            });
-            
-            let mut best = INF;
-            for &(u, v) in &edges {
-                let mut next = *state;
-                next.red.add_edge(u, v);
-                
-                let score = self.minimax(&next, depth - 1, alpha, beta, true, state.n);
-                
-                if self.timeout { return 0; }
-                best = best.min(score);
-                beta = beta.min(best);
-                if beta <= alpha { break; }
+                val = self.minimax(&next, depth - 1, alpha, beta, true, state.n);
+            } else {
+                val = state.eval_cop();
             }
-            val = best;
         }
 
         if !self.timeout {
